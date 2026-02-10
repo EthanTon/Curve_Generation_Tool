@@ -33,28 +33,55 @@ def generate_brim(path, base_width, base):
     return brim
 
 
-def _add_directions_to_points(points):
+def _add_directions_to_points(points, sigma=2.25):
+    """
+    Calculates stable tangent directions using Weighted PCA and returns
+    the raw unit vector (dx, dy) for each point.
+    """
     if len(points) == 0:
         return []
     if len(points) == 1:
-        return [(points[0][0], points[0][1], 1.0, 0.0)]
+        return [(float(points[0][0]), float(points[0][1]), 1.0, 0.0)]
+    
+    pts = np.asarray(points, dtype=float)
+    num_pts = len(pts)
+    indices = np.arange(num_pts)
     result = []
-    points_arr = np.asarray(points, dtype=float)
-    for i in range(len(points)):
-        if i == 0:
-            direction = points_arr[1] - points_arr[0]
-        elif i == len(points) - 1:
-            direction = points_arr[-1] - points_arr[-2]
+
+    for i in range(num_pts):
+        # 1. Compute Gaussian weights centered at current index
+        weights = np.exp(-0.5 * ((indices - i) / sigma) ** 2)
+
+        # 2. Weighted Covariance and PCA
+        weighted_center = np.average(pts, axis=0, weights=weights)
+        centered = pts - weighted_center
+        
+        # Weighted covariance matrix calculation matching weighted_pca_orthogonal
+        W = np.diag(weights)
+        cov = (centered.T @ W @ centered) / weights.sum()
+
+        # Extract tangent (the principal component)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        tangent = eigenvectors[:, np.argmax(eigenvalues)]
+        
+        # 3. Directional Polarity Correction
+        # PCA is orientation-agnostic; we force it to point 'forward' relative to the ordering
+        if i < num_pts - 1:
+            ref_vec = pts[i+1] - pts[i]
         else:
-            direction = points_arr[i + 1] - points_arr[i - 1]
-        length = np.linalg.norm(direction)
-        if length > 0:
-            direction /= length
-        else:
-            direction = np.array([1.0, 0.0])
-        result.append(
-            (points[i][0], points[i][1], float(direction[0]), float(direction[1]))
-        )
+            ref_vec = pts[i] - pts[i-1]
+            
+        if np.dot(tangent, ref_vec) < 0:
+            tangent = -tangent
+            
+        # 4. Return original data structure with raw tangent components
+        result.append((
+            float(pts[i][0]), 
+            float(pts[i][1]), 
+            float(tangent[0]), 
+            float(tangent[1])
+        ))
+        
     return result
 
 

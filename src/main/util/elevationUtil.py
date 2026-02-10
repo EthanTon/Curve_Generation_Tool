@@ -2,14 +2,20 @@ import numpy as np
 
 
 def generate_elevation_mask(
-    path, base_width, base, step_size=1, start_idx=0, end_idx=-1, z_start=0
+    path, base_width, base, step_size=1, start_idx=0, end_idx=-1, z_start=0, z_end=None
 ):
     boundaries = _path_boundaries(path, step_size, start_idx, end_idx)
     masks = mask_all(path, boundaries, base_width, base)
 
+    # Determine elevation direction: +1 per segment (uphill) or -1 (downhill)
+    if z_end is not None and z_end < z_start:
+        direction = -1
+    else:
+        direction = 1
+
     lut = {}
     for i, point_set in enumerate(masks):
-        lut[i] = {pt: z_start for pt in point_set}
+        lut[i] = {pt: z_start + i * direction for pt in point_set}
 
     return lut
 
