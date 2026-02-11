@@ -53,12 +53,6 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
 
     where (x, z, angle) is the pose and y is the elevation.
 
-    Segments are formed from consecutive points:
-        points[0] -> points[1], points[1] -> points[2], ...
-
-    If a previous segment could not fully reach its target elevation,
-    the deficit is carried forward as an offset into subsequent segments.
-
     Returns:
         (results, errors)
     """
@@ -67,7 +61,7 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
 
     results = []
     errors = []
-    offset = 0  # uncompleted elevation carried from previous segments
+    offset = 0
 
     for idx in range(len(points) - 1):
         start_pose, start_y = points[idx]
@@ -92,16 +86,26 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
             center_track, start_pose, end_pose, base_width, track_width
         )
 
-        slope_to_use = actual_slope if actual_slope is not None else path_length + 1
+        # --- Elevation mask (start/end y, let the function handle it) -----
+        abs_dz = abs(realised_y_end - effective_y_start)
+        if abs_dz > 0:
+            pts = np.asarray(center_track, dtype=float)
+            total_dist = np.sum(
+                np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            ) if len(pts) > 1 else 1.0
+            step_size = total_dist / ((abs_dz + 1) * np.sqrt(2))
+        else:
+            step_size = len(center_track) + 1
 
         elevation_mask = elevUtil.generate_elevation_mask(
             center_track,
             base_width,
             list(base[0]),
-            slope_to_use,
-            0,
-            -1,
-            effective_y_start,
+            step_size=step_size,
+            start_idx=0,
+            end_idx=-1,
+            z_start=effective_y_start,
+            z_end=realised_y_end,
         )
 
         results.append(
@@ -114,7 +118,6 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
                 "y_end_target": end_y,
                 "y_end_realised": realised_y_end,
                 "offset_remaining": offset,
-                "slope_used": slope_to_use,
                 "slope_min": slope_min,
                 "path_length": path_length,
                 "center_track": center_track,
@@ -130,9 +133,10 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
 def main():
     # Define the path as an ordered list of points: ((x, z, angle), y)
     points = [
-        ((0, 0, 0), 9),
-        ((0, 100, np.pi / 3), 11),
+        ((0, 0, 0), 8),
+        ((40, 100, np.pi / 3), 11),
         ((170, 170, np.pi / 2), 13),
+        ((170, 250, np.pi / 2), 13)
     ]
 
     results, errors = parse_points(
@@ -148,14 +152,15 @@ def main():
                 f"realised={res['y_end_realised']}, "
                 f"offset_remaining={res['offset_remaining']})"
             )
+
         eff = ""
         if res["y_start_effective"] != res["y_start"]:
             eff = f" (effective={res['y_start_effective']})"
+
         print(
             f"Segment {res['index']}: "
             f"path_len={res['path_length']}, "
-            f"y {res['y_start']}{eff}→{res['y_end_realised']} "
-            f"(slope={res['slope_used']:.1f}), "
+            f"y {res['y_start']}{eff} → {res['y_end_realised']}, "
             f"status={status}"
         )
 
@@ -164,10 +169,10 @@ def main():
         for seg_idx, msg in errors:
             print(f"  Segment {seg_idx}: {msg}")
 
-    # ---- Merge all segments – elevation mask keyed by y-level ------------
+    # ---- Merge all segments ----------------------------------------------
     combined_base = set()
     combined_brim = set()
-    combined_elevation = {}
+    combined_elevation = {0: {}}
     combined_track_center = []
     combined_rail0 = []
     combined_rail1 = []
@@ -177,10 +182,13 @@ def main():
         combined_base.update(map(tuple, base_set))
         combined_brim.update(map(tuple, brim_set))
 
-        # track[0] is a list of sub-lists — flatten into individual tuples
         track = res["track"]
         for sublist in track[0]:
-            if isinstance(sublist, (list, tuple)) and len(sublist) > 0 and isinstance(sublist[0], (list, tuple)):
+            if (
+                isinstance(sublist, (list, tuple))
+                and len(sublist) > 0
+                and isinstance(sublist[0], (list, tuple))
+            ):
                 combined_track_center.extend(sublist)
             else:
                 combined_track_center.append(sublist)
@@ -191,13 +199,10 @@ def main():
         combined_rail1.extend(track[2][0])
         combined_rail1.extend(track[2][1])
 
-        y_level = res["y_start_effective"]
-        if y_level not in combined_elevation:
-            combined_elevation[y_level] = {}
-
-        for seg_idx, point_map in res["elevation_mask"].items():
+        # Merge elevation mask directly
+        for mask_idx, point_map in res["elevation_mask"].items():
             for pt, y in point_map.items():
-                combined_elevation[y_level][pt] = y
+                combined_elevation[0][pt] = y
 
     exportUtil.export_full_track(
         combined_base,

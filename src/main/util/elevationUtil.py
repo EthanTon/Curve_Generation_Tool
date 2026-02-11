@@ -15,7 +15,14 @@ def generate_elevation_mask(
 
     lut = {}
     for i, point_set in enumerate(masks):
-        lut[i] = {pt: z_start + i * direction for pt in point_set}
+        y_val = z_start + i * direction
+        # Clamp to z_end so extra boundaries don't overshoot the target
+        if z_end is not None:
+            if direction >= 0:
+                y_val = min(y_val, z_end)
+            else:
+                y_val = max(y_val, z_end)
+        lut[i] = {pt: y_val for pt in point_set}
 
     return lut
 

@@ -16,8 +16,8 @@ def track(path, start, end, base_width, track_width, step_size=1):
     base_edge = determine_base_edge(path, base_width, base)
 
     track_center = generate_track_center_double(path, track_width, base)
-    rail_0 = generate_rail(track_center[0], 2, base)
-    rail_1 = generate_rail(track_center[1], 2, base)
+    rail_0 = generate_rail(track_center[0], 2, base, path)
+    rail_1 = generate_rail(track_center[1], 2, base, path)
     brim = generate_brim(path, base_width, base)
     return [base, brim], [track_center, rail_0, rail_1]
 
@@ -33,59 +33,82 @@ def generate_brim(path, base_width, base):
     return brim
 
 
-def _add_directions_to_points(points, sigma=2.25):
+def _center_path_tangents(center_path, window=3):
+    """Precompute unit tangent vectors for every point on a center path."""
+    cp = np.asarray(center_path, dtype=float)
+    n = len(cp)
+    tangents = np.empty_like(cp)
+    for i in range(n):
+        lo = max(i - window, 0)
+        hi = min(i + window, n - 1)
+        t = cp[hi] - cp[lo]
+        length = np.linalg.norm(t)
+        tangents[i] = t / length if length > 0 else np.array([1.0, 0.0])
+    return cp, tangents
+
+
+def _add_directions_to_points(points, center_path=None):
     """
-    Calculates stable tangent directions using Weighted PCA and returns
-    the raw unit vector (dx, dy) for each point.
+    Assigns a unit tangent direction to each point.
+
+    If *center_path* is provided, directions are derived from the nearest
+    point on that path (smooth, stable).  Otherwise a simple finite-
+    difference fallback is used on *points* itself.
     """
     if len(points) == 0:
         return []
-    if len(points) == 1:
-        return [(float(points[0][0]), float(points[0][1]), 1.0, 0.0)]
-    
+
     pts = np.asarray(points, dtype=float)
-    num_pts = len(pts)
-    indices = np.arange(num_pts)
-    result = []
 
-    for i in range(num_pts):
-        # 1. Compute Gaussian weights centered at current index
-        weights = np.exp(-0.5 * ((indices - i) / sigma) ** 2)
+    # ------------------------------------------------------------------
+    # Primary mode: project onto center path and inherit its tangent
+    # ------------------------------------------------------------------
+    if center_path is not None and len(center_path) >= 2:
+        cp, tangents = _center_path_tangents(center_path)
 
-        # 2. Weighted Covariance and PCA
-        weighted_center = np.average(pts, axis=0, weights=weights)
-        centered = pts - weighted_center
-        
-        # Weighted covariance matrix calculation matching weighted_pca_orthogonal
-        W = np.diag(weights)
-        cov = (centered.T @ W @ centered) / weights.sum()
+        # Vectorised nearest-neighbour lookup (chunked for large sets)
+        chunk = max(1, int(25_000_000 / max(len(cp), 1)))
+        nearest_idx = np.empty(len(pts), dtype=int)
+        for lo in range(0, len(pts), chunk):
+            hi = min(lo + chunk, len(pts))
+            diffs = pts[lo:hi, np.newaxis, :] - cp[np.newaxis, :, :]
+            dists_sq = np.sum(diffs ** 2, axis=2)
+            nearest_idx[lo:hi] = np.argmin(dists_sq, axis=1)
 
-        # Extract tangent (the principal component)
-        eigenvalues, eigenvectors = np.linalg.eigh(cov)
-        tangent = eigenvectors[:, np.argmax(eigenvalues)]
-        
-        # 3. Directional Polarity Correction
-        # PCA is orientation-agnostic; we force it to point 'forward' relative to the ordering
-        if i < num_pts - 1:
-            ref_vec = pts[i+1] - pts[i]
-        else:
-            ref_vec = pts[i] - pts[i-1]
-            
-        if np.dot(tangent, ref_vec) < 0:
-            tangent = -tangent
-            
-        # 4. Return original data structure with raw tangent components
-        result.append((
-            float(pts[i][0]), 
-            float(pts[i][1]), 
-            float(tangent[0]), 
-            float(tangent[1])
-        ))
-        
-    return result
+        result = []
+        for i in range(len(pts)):
+            t = tangents[nearest_idx[i]]
+            result.append((
+                float(pts[i][0]),
+                float(pts[i][1]),
+                float(t[0]),
+                float(t[1]),
+            ))
+        return result
+
+    # ------------------------------------------------------------------
+    # Fallback: finite-difference tangent on the points themselves
+    # ------------------------------------------------------------------
+    if len(points) == 1:
+        return [(float(pts[0][0]), float(pts[0][1]), 1.0, 0.0)]
+
+    directions = np.empty_like(pts)
+    directions[0] = pts[1] - pts[0]
+    directions[-1] = pts[-1] - pts[-2]
+    if len(pts) > 2:
+        directions[1:-1] = pts[2:] - pts[:-2]
+    lengths = np.linalg.norm(directions, axis=1, keepdims=True)
+    lengths[lengths == 0] = 1
+    directions /= lengths
+
+    return [
+        (float(pts[i][0]), float(pts[i][1]),
+         float(directions[i][0]), float(directions[i][1]))
+        for i in range(len(pts))
+    ]
 
 
-def generate_rail(track_center, rail_width, base):
+def generate_rail(track_center, rail_width, base, center_path=None):
     if len(track_center) < 2:
         return [], []
     track_center_xy = [(pt[0], pt[1]) for pt in track_center]
@@ -124,8 +147,11 @@ def generate_rail(track_center, rail_width, base):
     outer_points.sort(key=lambda x: x[0])
     inner_rail_xy = [pt for _, pt in inner_points]
     outer_rail_xy = [pt for _, pt in outer_points]
-    inner_rail = _add_directions_to_points(inner_rail_xy)
-    outer_rail = _add_directions_to_points(outer_rail_xy)
+
+    # Use the center path for tangent directions (falls back to self if None)
+    path_xy = [(p[0], p[1]) for p in center_path] if center_path is not None else None
+    inner_rail = _add_directions_to_points(inner_rail_xy, center_path=path_xy)
+    outer_rail = _add_directions_to_points(outer_rail_xy, center_path=path_xy)
     return inner_rail, outer_rail
 
 
@@ -225,8 +251,12 @@ def generate_track_center_double(path, track_width, base):
 
     left_ordered = order_points_manhattan(left_set)
     right_ordered = order_points_manhattan(right_set)
-    return _add_directions_to_points(left_ordered), _add_directions_to_points(
-        right_ordered
+
+    # Use the original path as the center reference for tangent directions
+    path_xy = [(float(p[0]), float(p[1])) for p in path]
+    return (
+        _add_directions_to_points(left_ordered, center_path=path_xy),
+        _add_directions_to_points(right_ordered, center_path=path_xy),
     )
 
 
@@ -243,7 +273,8 @@ def generate_track_center_single(path, track_width, base):
             if pt in base:
                 seen.add(pt)
                 track_center.append(pt)
-    return _add_directions_to_points(track_center)
+    path_xy = [(float(p[0]), float(p[1])) for p in path]
+    return _add_directions_to_points(track_center, center_path=path_xy)
 
 
 def generate_base(path, start, end, width):
