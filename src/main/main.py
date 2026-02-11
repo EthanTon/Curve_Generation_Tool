@@ -1,6 +1,6 @@
 import util.dubinsUtil as dubinUtil
 import util.trackUtil as trackUtil
-import util.pantographUtil as pantographUtil
+import util.newpantographUtil as pantographUtil
 import util.elevationUtil as elevUtil
 import util.exportUtil as exportUtil
 import numpy as np
@@ -155,8 +155,8 @@ def main():
     ]
 
     results, errors = parse_points(
-        points, radius=100.0, base_width=13, track_width=7, slope_min=35,
-        pantograph_interval=35,
+        points, radius=50.0, base_width=13, track_width=7, slope_min=35,
+        pantograph_interval=45,
     )
 
     # ---- Report per-segment diagnostics ----------------------------------
@@ -244,26 +244,25 @@ def main():
     (
         combined_poles,
         pole_lines,
-        cross_line_pixels,
+        cross_lines,
         overhead_wire_pixels,
         tc1_intersections,
         tc2_intersections,
+        wire1_pixels,
+        wire2_pixels,
     ) = pantographUtil.apply_pantograph(
         combined_center_track,
         combined_base,
         base_width,
         combined_elevation,
+        track_outer1=combined_rail0,
+        track_outer2=combined_rail1,
         track_center1=combined_track_center_left,
         track_center2=combined_track_center_right,
-        rail0=combined_rail0,
-        rail1=combined_rail1,
         pantograph_interval=45,
     )
 
     # Ensure every pole position has a ground elevation entry.
-    # Poles sit at the base edge and may not have one yet — look up the
-    # nearest known elevation so the export places the pole column at the
-    # correct Y.
     for left, right in combined_poles:
         for p in (left, right):
             key = (int(round(p[0])), int(round(p[1])))
@@ -273,10 +272,6 @@ def main():
                 )
 
     # Re-wrap elevation into the {0: {...}} format expected by export
-    # NOTE: pole_lines is passed separately as pantograph_elevation so
-    # overhead structures get their own interpolated Y.  Do NOT merge
-    # pole_lines into combined_elevation — that would overwrite the
-    # base/brim/track ground elevations with wire elevations.
     combined_elevation_wrapped = {0: combined_elevation}
 
     exportUtil.export_full_track(
@@ -288,15 +283,19 @@ def main():
         combined_elevation_wrapped,
         filename="track.schem",
         poles=combined_poles,
-        cross_line_pixels=cross_line_pixels,
+        cross_lines=cross_lines,
         overhead_wire_pixels=overhead_wire_pixels,
+        wire1_pixels=wire1_pixels,
+        wire2_pixels=wire2_pixels,
         pantograph_elevation=pole_lines,
     )
 
     print(f"\nExported {len(combined_base)} blocks to track.schem")
     print(f"Total pantograph poles: {len(combined_poles)} pairs")
-    print(f"Cross-line pixels: {len(cross_line_pixels)}")
+    print(f"Cross-lines: {len(cross_lines)}")
     print(f"Overhead wire pixels: {len(overhead_wire_pixels)}")
+    print(f"Wire 1 pixels: {len(wire1_pixels)}")
+    print(f"Wire 2 pixels: {len(wire2_pixels)}")
     print(f"Track 1 intersections: {len(tc1_intersections)}")
     print(f"Track 2 intersections: {len(tc2_intersections)}")
 
