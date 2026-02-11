@@ -1,8 +1,22 @@
 import util.dubinsUtil as dubinUtil
 import util.trackUtil as trackUtil
+import util.pantographUtil as pantographUtil
 import util.elevationUtil as elevUtil
 import util.exportUtil as exportUtil
 import numpy as np
+
+
+def _nearest_elevation(pt, elevation_map, default=0):
+    """Spiral search for the nearest known ground elevation."""
+    for r in range(1, 20):
+        for dx in range(-r, r + 1):
+            for dz in range(-r, r + 1):
+                if abs(dx) != r and abs(dz) != r:
+                    continue
+                neighbour = (pt[0] + dx, pt[1] + dz)
+                if neighbour in elevation_map:
+                    return elevation_map[neighbour]
+    return default
 
 
 def compute_slope_for_segment(path_length, y_start, y_end, slope_min, offset=0):
@@ -44,7 +58,8 @@ def compute_slope_for_segment(path_length, y_start, y_end, slope_min, offset=0):
     return slope_min, realised_y_end, err, remaining_offset, effective_y_start
 
 
-def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35):
+def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35,
+                 pantograph_interval=45):
     """
     Process an ordered list of points and generate segments from consecutive pairs.
 
@@ -81,12 +96,12 @@ def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35
         if err_msg is not None:
             errors.append((idx, err_msg))
 
-        # --- Geometry -----------------------------------------------------
+        # --- Geometry (no pantograph – applied later on combined curve) ----
         base, track = trackUtil.track(
-            center_track, start_pose, end_pose, base_width, track_width
+            center_track, start_pose, end_pose, base_width, track_width,
         )
 
-        # --- Elevation mask (start/end y, let the function handle it) -----
+        # --- Elevation mask -----------------------------------------------
         abs_dz = abs(realised_y_end - effective_y_start)
         if abs_dz > 0:
             pts = np.asarray(center_track, dtype=float)
@@ -140,7 +155,8 @@ def main():
     ]
 
     results, errors = parse_points(
-        points, radius=50.0, base_width=13, track_width=7, slope_min=35
+        points, radius=100.0, base_width=13, track_width=7, slope_min=35,
+        pantograph_interval=35,
     )
 
     # ---- Report per-segment diagnostics ----------------------------------
@@ -172,8 +188,11 @@ def main():
     # ---- Merge all segments ----------------------------------------------
     combined_base = set()
     combined_brim = set()
-    combined_elevation = {0: {}}
-    combined_track_center = []
+    combined_elevation = {}
+    combined_center_track = []
+    combined_track_center = []          # mixed (for export rail rendering)
+    combined_track_center_left = []     # left track centre  (for pantograph)
+    combined_track_center_right = []    # right track centre (for pantograph)
     combined_rail0 = []
     combined_rail1 = []
 
@@ -182,7 +201,23 @@ def main():
         combined_base.update(map(tuple, base_set))
         combined_brim.update(map(tuple, brim_set))
 
+        # Accumulate the raw centre-line for the pantograph pass
+        combined_center_track.extend(res["center_track"])
+
         track = res["track"]
+        # track[0] is (left_ordered_with_dirs, right_ordered_with_dirs)
+        track_center_pair = track[0]
+
+        # Separate left / right track centres for pantograph intersection
+        if (isinstance(track_center_pair, (list, tuple))
+                and len(track_center_pair) == 2):
+            left_tc, right_tc = track_center_pair
+            if isinstance(left_tc, (list, tuple)):
+                combined_track_center_left.extend(left_tc)
+            if isinstance(right_tc, (list, tuple)):
+                combined_track_center_right.extend(right_tc)
+
+        # Also build the mixed list expected by the export rail renderer
         for sublist in track[0]:
             if (
                 isinstance(sublist, (list, tuple))
@@ -199,10 +234,50 @@ def main():
         combined_rail1.extend(track[2][0])
         combined_rail1.extend(track[2][1])
 
-        # Merge elevation mask directly
+        # Merge elevation mask into a flat dict
         for mask_idx, point_map in res["elevation_mask"].items():
             for pt, y in point_map.items():
-                combined_elevation[0][pt] = y
+                combined_elevation[pt] = y
+
+    # ---- Pantograph (applied once on the full combined curve) -------------
+    base_width = 13  # must match the value used during segment generation
+    (
+        combined_poles,
+        pole_lines,
+        cross_line_pixels,
+        overhead_wire_pixels,
+        tc1_intersections,
+        tc2_intersections,
+    ) = pantographUtil.apply_pantograph(
+        combined_center_track,
+        combined_base,
+        base_width,
+        combined_elevation,
+        track_center1=combined_track_center_left,
+        track_center2=combined_track_center_right,
+        rail0=combined_rail0,
+        rail1=combined_rail1,
+        pantograph_interval=45,
+    )
+
+    # Ensure every pole position has a ground elevation entry.
+    # Poles sit at the base edge and may not have one yet — look up the
+    # nearest known elevation so the export places the pole column at the
+    # correct Y.
+    for left, right in combined_poles:
+        for p in (left, right):
+            key = (int(round(p[0])), int(round(p[1])))
+            if key not in combined_elevation:
+                combined_elevation[key] = _nearest_elevation(
+                    key, combined_elevation
+                )
+
+    # Re-wrap elevation into the {0: {...}} format expected by export
+    # NOTE: pole_lines is passed separately as pantograph_elevation so
+    # overhead structures get their own interpolated Y.  Do NOT merge
+    # pole_lines into combined_elevation — that would overwrite the
+    # base/brim/track ground elevations with wire elevations.
+    combined_elevation_wrapped = {0: combined_elevation}
 
     exportUtil.export_full_track(
         combined_base,
@@ -210,11 +285,20 @@ def main():
         combined_track_center,
         combined_rail0,
         combined_rail1,
-        combined_elevation,
+        combined_elevation_wrapped,
         filename="track.schem",
+        poles=combined_poles,
+        cross_line_pixels=cross_line_pixels,
+        overhead_wire_pixels=overhead_wire_pixels,
+        pantograph_elevation=pole_lines,
     )
 
     print(f"\nExported {len(combined_base)} blocks to track.schem")
+    print(f"Total pantograph poles: {len(combined_poles)} pairs")
+    print(f"Cross-line pixels: {len(cross_line_pixels)}")
+    print(f"Overhead wire pixels: {len(overhead_wire_pixels)}")
+    print(f"Track 1 intersections: {len(tc1_intersections)}")
+    print(f"Track 2 intersections: {len(tc2_intersections)}")
 
 
 if __name__ == "__main__":

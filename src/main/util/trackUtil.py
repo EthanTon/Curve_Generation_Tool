@@ -1,20 +1,16 @@
 import numpy as np
 
 from util.shapeUtil import (
-    bresenham_arc,
     bresenham_circle,
     bresenham_circle_4connected,
     bresenham_filled_arc,
     bresenham_filled_circle,
     bresenham_line,
-    step_line,
 )
 
 
-def track(path, start, end, base_width, track_width, step_size=1):
+def track(path, start, end, base_width, track_width):
     base = generate_base(path, start, end, base_width)
-    base_edge = determine_base_edge(path, base_width, base)
-
     track_center = generate_track_center_double(path, track_width, base)
     rail_0 = generate_rail(track_center[0], 2, base, path)
     rail_1 = generate_rail(track_center[1], 2, base, path)
@@ -60,13 +56,9 @@ def _add_directions_to_points(points, center_path=None):
 
     pts = np.asarray(points, dtype=float)
 
-    # ------------------------------------------------------------------
-    # Primary mode: project onto center path and inherit its tangent
-    # ------------------------------------------------------------------
     if center_path is not None and len(center_path) >= 2:
         cp, tangents = _center_path_tangents(center_path)
 
-        # Vectorised nearest-neighbour lookup (chunked for large sets)
         chunk = max(1, int(25_000_000 / max(len(cp), 1)))
         nearest_idx = np.empty(len(pts), dtype=int)
         for lo in range(0, len(pts), chunk):
@@ -86,9 +78,6 @@ def _add_directions_to_points(points, center_path=None):
             ))
         return result
 
-    # ------------------------------------------------------------------
-    # Fallback: finite-difference tangent on the points themselves
-    # ------------------------------------------------------------------
     if len(points) == 1:
         return [(float(pts[0][0]), float(pts[0][1]), 1.0, 0.0)]
 
@@ -148,7 +137,6 @@ def generate_rail(track_center, rail_width, base, center_path=None):
     inner_rail_xy = [pt for _, pt in inner_points]
     outer_rail_xy = [pt for _, pt in outer_points]
 
-    # Use the center path for tangent directions (falls back to self if None)
     path_xy = [(p[0], p[1]) for p in center_path] if center_path is not None else None
     inner_rail = _add_directions_to_points(inner_rail_xy, center_path=path_xy)
     outer_rail = _add_directions_to_points(outer_rail_xy, center_path=path_xy)
@@ -252,29 +240,11 @@ def generate_track_center_double(path, track_width, base):
     left_ordered = order_points_manhattan(left_set)
     right_ordered = order_points_manhattan(right_set)
 
-    # Use the original path as the center reference for tangent directions
     path_xy = [(float(p[0]), float(p[1])) for p in path]
     return (
         _add_directions_to_points(left_ordered, center_path=path_xy),
         _add_directions_to_points(right_ordered, center_path=path_xy),
     )
-
-
-def generate_track_center_single(path, track_width, base):
-    track_center = []
-    seen = set()
-    for i in range(len(path) - 1):
-        p1 = path[i]
-        p2 = path[i + 1]
-        segment = step_line(p1[0], p1[1], p2[0], p2[1])
-        for pt in segment:
-            if pt in seen:
-                continue
-            if pt in base:
-                seen.add(pt)
-                track_center.append(pt)
-    path_xy = [(float(p[0]), float(p[1])) for p in path]
-    return _add_directions_to_points(track_center, center_path=path_xy)
 
 
 def generate_base(path, start, end, width):
@@ -310,59 +280,3 @@ def clean_end(base, start, end, distance):
         if pt in base and pt not in protected:
             base.remove(pt)
     return
-
-
-def determine_base_edge(path, width, base):
-    filter = set()
-    for x, y in path:
-        filter.update(bresenham_filled_circle(x, y, width // 2 - 1))
-    return set(base - filter)
-
-
-def determine_orthogonal_intersection_points(p_r, width, path_r):
-    x, y = p_r
-    distance = width // 2
-
-    def get_avg_intersection(start, end, clockwise):
-        arc = bresenham_arc(x, y, distance, start, end, clockwise)
-        return average_point(set(arc) & set(path_r))
-
-    s_v, e_v = (x, y + distance), (x, y - distance)
-    avg_right = get_avg_intersection(s_v, e_v, True)
-    avg_left = get_avg_intersection(s_v, e_v, False)
-    if np.linalg.norm(np.array(avg_right) - np.array(avg_left)) > distance:
-        return avg_right, avg_left
-    s_h, e_h = (x + distance, y), (x - distance, y)
-    avg_top = get_avg_intersection(s_h, e_h, True)
-    avg_bottom = get_avg_intersection(s_h, e_h, False)
-    return avg_top, avg_bottom
-
-
-def average_point(points):
-    if not points:
-        return (0, 0)
-    pts = list(points)
-    x_avg = np.rint(sum(p[0] for p in pts) / len(pts))
-    y_avg = np.rint(sum(p[1] for p in pts) / len(pts))
-    return (x_avg, y_avg)
-
-
-def weighted_pca_orthogonal(path, index, sigma=2):
-    pts = np.array(path, dtype=float)
-    center = pts[index]
-
-    # Gaussian weights based on index distance
-    indices = np.arange(len(path))
-    weights = np.exp(-0.5 * ((indices - index) / sigma) ** 2)
-
-    weighted_center = np.average(pts, axis=0, weights=weights)
-    centered = pts - weighted_center
-
-    # Weighted covariance
-    W = np.diag(weights)
-    cov = (centered.T @ W @ centered) / weights.sum()
-
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-    tangent = eigenvectors[:, np.argmax(eigenvalues)]
-    normal = (-tangent[1], tangent[0])
-    return normal
