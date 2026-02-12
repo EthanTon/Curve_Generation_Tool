@@ -1,6 +1,6 @@
 import util.dubinsUtil as dubinUtil
 import util.trackUtil as trackUtil
-import util.newpantographUtil as pantographUtil
+import util.pantographUtil as pantographUtil
 import util.elevationUtil as elevUtil
 import util.exportUtil as exportUtil
 import numpy as np
