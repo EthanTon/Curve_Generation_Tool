@@ -55,7 +55,7 @@ See `sample.json` for a working example.
   "config": {                 // Optional – overrides defaults
     "base_width": 13,
     "track_width": 7,
-    "turn_radius": 300,
+    "turn_radius": 150,
     "catenary_interval": 35,
     "catenary_offset": 0,
     "base_block": "minecraft:gray_wool",
