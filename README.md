@@ -1,4 +1,4 @@
-# Minecraft Track Generator
+# Curve Generation Tool
 
 Generates Minecraft Sponge Schematic (`.schem`) files from a set of control points using Dubins paths. Define a route with headings, optionally add elevation ramps, and export a paste-ready schematic with a configurable track surface, base, brim, and catenary supports.
 
