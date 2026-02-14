@@ -6,6 +6,8 @@ from util.shapeUtil import (
     bresenham_filled_arc,
     bresenham_filled_circle,
     bresenham_line,
+    bresenham_filled_circle_stepped,
+    bresenham_filled_arc_stepped,
 )
 
 
@@ -250,7 +252,7 @@ def generate_track_center_double(path, track_width, base):
 def generate_base(path, start, end, width):
     base = set()
     for n in path:
-        base.update(bresenham_filled_circle(n[0], n[1], width // 2))
+        base.update(bresenham_filled_circle(int(n[0]), int(n[1]), width // 2))
     clean_end(base, start, end, width // 2)
     return base
 

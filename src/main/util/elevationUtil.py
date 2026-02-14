@@ -1,150 +1,124 @@
 import numpy as np
 
+from util.pathUtil import path_boundaries
+from util.maskingUtil import mask_all
 
-def generate_elevation_mask(
-    path, base_width, base, step_size=1, start_idx=0, end_idx=-1, z_start=0, z_end=None
+
+def _points_match(a, b):
+    """Compare two points by their first 2 coordinates (x, y), ignoring z."""
+    return np.array_equal(np.asarray(a)[:2], np.asarray(b)[:2])
+
+
+def _nearest_path_index(path, point, tolerance=None):
+    """Return the index of the path point closest to `point` (2D).
+
+    If *tolerance* is given the match must be within that distance,
+    otherwise the closest point is returned unconditionally.
+    """
+    target = np.asarray(point, dtype=float)[:2]
+    best_idx = None
+    best_dist = np.inf
+    for idx, pt in enumerate(path):
+        d = np.linalg.norm(np.asarray(pt, dtype=float)[:2] - target)
+        if d < best_dist:
+            best_dist = d
+            best_idx = idx
+    if tolerance is not None and best_dist > tolerance:
+        return None
+    return best_idx
+
+
+def generate_elevation_lookup(
+    path, base_width, base, step_size, elevation_control_points
 ):
-    boundaries = _path_boundaries(path, step_size, start_idx, end_idx)
-    masks = mask_all(path, boundaries, base_width, base)
-
-    # Determine elevation direction: +1 per segment (uphill) or -1 (downhill)
-    if z_end is not None and z_end < z_start:
-        direction = -1
-    else:
-        direction = 1
-
     lut = {}
-    for i, point_set in enumerate(masks):
-        y_val = z_start + i * direction
-        # Clamp to z_end so extra boundaries don't overshoot the target
-        if z_end is not None:
-            if direction >= 0:
-                y_val = min(y_val, z_end)
-            else:
-                y_val = max(y_val, z_end)
-        lut[i] = {pt: y_val for pt in point_set}
+
+    for i in range(len(elevation_control_points) - 1):
+        start_pt = elevation_control_points[i]
+        end_pt = elevation_control_points[i + 1]
+
+        # Find the indices in the path closest to the start and end control points
+        start_idx = _nearest_path_index(path, start_pt)
+        end_idx = _nearest_path_index(path, end_pt)
+
+        if start_idx is None:
+            raise ValueError(
+                f"Invalid control point: {start_pt} was not found in the path."
+            )
+        if end_idx is None:
+            raise ValueError(
+                f"Invalid control point: {end_pt} was not found in the path."
+            )
+
+        # Determine the z levels for the start and end control points
+        z_start = start_pt[2]
+        z_end = end_pt[2]
+
+        # Generate the elevation mask for this segment of the path
+        segment_lut = generate_elevation_mask(
+            path,
+            base_width,
+            base,
+            step_size,
+            min_step=step_size,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            z_start=z_start,
+            z_end=z_end,
+        )
+
+        # Merge the segment LUT into the overall LUT
+        lut.update(segment_lut)
 
     return lut
 
 
-def _path_boundaries(path, step_size, start_idx, end_idx):
-    if end_idx == -1:
-        end_idx = len(path) - 1
+def generate_elevation_mask(
+    path,
+    base_width,
+    base,
+    step_size=1,
+    min_step=1,
+    start_idx=0,
+    end_idx=-1,
+    z_start=0,
+    z_end=None,
+):
+    direction = -1 if (z_end is not None and z_end < z_start) else 1
 
-    boundaries = [start_idx] if start_idx != 0 else []
+    # Number of distinct elevation levels (inclusive of both endpoints)
+    required_steps = abs(z_end - z_start) + 1 if z_end is not None else None
 
-    slope = step_size * np.sqrt(2)
-
-    reference = path[start_idx]
-
-    for n in range(start_idx, end_idx + 1):
-        if np.linalg.norm(reference - path[n]) > slope:
-            reference = path[n]
-            boundaries.append(n)
-
-    return boundaries
-
-
-def _path_tangent(pts, index, window=3):
-    lo = max(index - window, 0)
-    hi = min(index + window, len(pts) - 1)
-    tangent = pts[hi] - pts[lo]
-
-    length = np.linalg.norm(tangent)
-    if length > 0:
-        tangent = tangent / length
-    else:
-        tangent = np.array([1.0, 0.0])
-
-    return tangent
-
-
-def mask_all(path, boundaries, base_width, base):
-    pts = np.asarray(path, dtype=float)  # (P, 2)
-    P = len(pts)
-    base_list = list(base)
-    base_arr = np.asarray(base_list, dtype=float)  # (B, 2)
-    B = len(base_arr)
-    n_boundaries = len(boundaries)
-    n_segments = n_boundaries + 1
-
-    if n_boundaries == 0:
-        return [set(base)]
-
-    # ------------------------------------------------------------------
-    # Pass 1: Voronoi — assign each base point to nearest path index
-    # ------------------------------------------------------------------
-    chunk = max(1, int(25_000_000 / max(P, 1)))
-    nearest_idx = np.empty(B, dtype=int)
-
-    for lo in range(0, B, chunk):
-        hi = min(lo + chunk, B)
-        diffs = base_arr[lo:hi, np.newaxis, :] - pts[np.newaxis, :, :]
-        dists_sq = np.sum(diffs**2, axis=2)  # (hi-lo, P)
-        nearest_idx[lo:hi] = np.argmin(dists_sq, axis=1)
-
-    # Map nearest path index → preliminary segment
-    # Segment edges: (-inf, boundaries[0]), [boundaries[0], boundaries[1]), …
-    seg_edges = np.array(boundaries, dtype=int)
-    assignment = np.searchsorted(seg_edges, nearest_idx, side="right")
-    # assignment[i] is in [0, n_segments-1]
-
-    # ------------------------------------------------------------------
-    # Pass 2: Orthogonal refinement at each boundary
-    # Only re-split points within base_width/2 of the boundary point;
-    # distant points keep their Voronoi assignment.
-    # ------------------------------------------------------------------
-    radius = base_width // 2 + 1  # +1 to ensure we cover all points within base_width/2
-    radius_sq = radius * radius
-
-    for j, b_idx in enumerate(boundaries):
-        tangent = _path_tangent(pts, b_idx)
-        origin = pts[b_idx]
-
-        seg_before = j  # segment index on the "backward" side
-        seg_after = j + 1  # segment index on the "forward" side
-
-        # Select points currently in either neighbouring segment
-        candidates = np.where((assignment == seg_before) | (assignment == seg_after))[0]
-
-        if len(candidates) == 0:
-            continue
-
-        # Distance filter: only refine points within base_width/2 of origin
-        diff = base_arr[candidates] - origin  # (C, 2)
-        dist_sq = diff[:, 0] ** 2 + diff[:, 1] ** 2
-        within = dist_sq <= radius_sq
-        local = candidates[within]
-
-        if len(local) == 0:
-            continue
-
-        # Signed projection: positive = forward of orthogonal line
-        local_diff = base_arr[local] - origin
-        proj = local_diff[:, 0] * tangent[0] + local_diff[:, 1] * tangent[1]
-
-        assignment[local[proj >= 0]] = seg_after
-        assignment[local[proj < 0]] = seg_before
-
-    masks = []
-    for seg in range(n_segments):
-        masks.append({base_list[i] for i in np.where(assignment == seg)[0]})
-    return masks
-
-
-def mask(path, start_idx, end_idx, base_width, base):
     boundaries = []
-    if start_idx is not None and start_idx > 0:
-        boundaries.append(start_idx)
-    if end_idx is not None and end_idx < len(path):
-        boundaries.append(end_idx)
+    if required_steps is not None:
+        # Determine the largest step size that still produces enough mask layers
+        # to cover the required elevation change, while staying >= min_step
+        path_length = end_idx - start_idx
+        # Floor division gives the largest step that yields enough segments
+        elevation_step = path_length // (required_steps + 2)
+        # Use the largest step possible, but no smaller than min_step
+        effective_step = max(min_step, elevation_step)
+        boundaries = path_boundaries(path, effective_step, start_idx, end_idx)
+    else:
+        boundaries = path_boundaries(path, step_size, start_idx, end_idx)
 
     masks = mask_all(path, boundaries, base_width, base)
 
-    # Determine which segment corresponds to our request
-    if start_idx is None or start_idx == 0:
-        return masks[0]
-    else:
-        # Our segment is after the start boundary
-        seg = boundaries.index(start_idx) + 1
-        return masks[seg]
+    num_steps = len(masks)
+
+    if required_steps is not None and num_steps < required_steps:
+        raise ValueError(
+            f"Invalid control point: the elevation change from z={z_start} to z={z_end} "
+            f"requires {required_steps} mask layers, but only {num_steps} were generated "
+            f"for the given path segment (indices {start_idx} to {end_idx}). "
+            f"Adjust the control point positions or elevation values."
+        )
+
+    lut: dict[tuple, float] = {}
+    for i, point_set in enumerate(masks):
+        y_val = z_start + i * direction
+        if z_end is not None:
+            y_val = min(y_val, z_end) if direction >= 0 else max(y_val, z_end)
+        for pt in point_set:
+            lut[pt] = y_val
+    return lut

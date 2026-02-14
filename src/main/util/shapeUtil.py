@@ -331,6 +331,134 @@ def bresenham_filled_arc_4connected(
     return final_points
 
 
+def bresenham_filled_arc_stepped(
+    xc, yc, r, start_point, end_point, counterclockwise=True
+):
+    """
+    Fills an arc where every boundary pixel has all faces covered by an
+    additional neighbor pixel, similar to double_step_line.
+
+    Instead of post-hoc dilation, the arc perimeter algorithm emits extra
+    adjacent pixels whenever a diagonal step occurs — one offset along each
+    axis of change — so that no face of any boundary pixel is left exposed.
+    Radial edges use double_step_line for the same coverage guarantee.
+    """
+    if r <= 0:
+        return [(xc, yc)]
+
+    boundary_points = []
+
+    # A. Radial edges with double-step coverage
+    boundary_points.extend(double_step_line(xc, yc, start_point[0], start_point[1]))
+    boundary_points.extend(double_step_line(xc, yc, end_point[0], end_point[1]))
+
+    # B. Arc perimeter with double-step neighbor pixels on diagonal moves
+    x, y, err = -r, 0, 2 - 2 * r
+    start_angle = determine_angle((xc, yc), start_point)
+    end_angle = determine_angle((xc, yc), end_point)
+
+    def add_perimeter(cur_x, cur_y):
+        """Emit the 8 symmetric candidates filtered to the arc range."""
+        candidates = [
+            (xc - cur_x, yc + cur_y),
+            (xc + cur_y, yc - cur_x),
+            (xc - cur_y, yc - cur_x),
+            (xc + cur_x, yc + cur_y),
+            (xc + cur_x, yc - cur_y),
+            (xc - cur_y, yc + cur_x),
+            (xc + cur_y, yc + cur_x),
+            (xc - cur_x, yc - cur_y),
+        ]
+        for px, py in candidates:
+            if angle_in_arc(
+                determine_angle((xc, yc), (px, py)),
+                start_angle,
+                end_angle,
+                counterclockwise,
+            ):
+                boundary_points.append((px, py))
+
+    def add_double_step_neighbors(prev_x, prev_y, new_x, new_y):
+        """
+        On a diagonal step, emit extra pixels for both intermediate positions
+        (only-Y-changed and only-X-changed), filtered to the arc range.
+        Analogous to double_step_line's extra neighbor emissions.
+        """
+        # Intermediate: Y changed, X stayed at prev
+        intermediates_y = [
+            (xc - prev_x, yc + new_y),
+            (xc + new_y, yc - prev_x),
+            (xc - new_y, yc - prev_x),
+            (xc + prev_x, yc + new_y),
+            (xc + prev_x, yc - new_y),
+            (xc - new_y, yc + prev_x),
+            (xc + new_y, yc + prev_x),
+            (xc - prev_x, yc - new_y),
+        ]
+        # Intermediate: X changed, Y stayed at prev
+        intermediates_x = [
+            (xc - new_x, yc + prev_y),
+            (xc + prev_y, yc - new_x),
+            (xc - prev_y, yc - new_x),
+            (xc + new_x, yc + prev_y),
+            (xc + new_x, yc - prev_y),
+            (xc - prev_y, yc + new_x),
+            (xc + prev_y, yc + new_x),
+            (xc - new_x, yc - prev_y),
+        ]
+        for px, py in intermediates_y + intermediates_x:
+            if angle_in_arc(
+                determine_angle((xc, yc), (px, py)),
+                start_angle,
+                end_angle,
+                counterclockwise,
+            ):
+                boundary_points.append((px, py))
+
+    while abs(x) >= y:
+        add_perimeter(x, y)
+
+        prev_x, prev_y = x, y
+        curr_err = err
+
+        stepped_y = False
+        stepped_x = False
+
+        if curr_err <= y:
+            y += 1
+            err += y * 2 + 1
+            stepped_y = True
+
+        if curr_err > prev_x or err > y:
+            x += 1
+            err += x * 2 + 1
+            stepped_x = True
+
+        # Diagonal step — add double-step neighbor pixels for face coverage
+        if stepped_x and stepped_y:
+            add_double_step_neighbors(prev_x, prev_y, x, y)
+
+        add_perimeter(x, y)
+
+    # C. Build scanline spans from boundary and fill
+    y_spans = {}
+    for px, py in boundary_points:
+        if py not in y_spans:
+            y_spans[py] = [px, px]
+        else:
+            if px < y_spans[py][0]:
+                y_spans[py][0] = px
+            if px > y_spans[py][1]:
+                y_spans[py][1] = px
+
+    final_points = []
+    for py, (min_x, max_x) in y_spans.items():
+        for px in range(min_x, max_x + 1):
+            final_points.append((px, py))
+
+    return final_points
+
+
 def bresenham_filled_arc(xc, yc, r, start_point, end_point, counterclockwise=True):
     """Fills an arc by defining the boundary and filling horizontal spans (scanlines)."""
 
@@ -551,6 +679,109 @@ def bresenham_filled_circle(xc, yc, r, thick=False):
             x += 1
             err += x * 2 + 1
 
+    return points
+
+
+def bresenham_filled_circle_stepped(xc, yc, r):
+    """
+    Generates a filled circle where every boundary pixel has all faces covered
+    by an additional neighbor pixel, similar to double_step_line.
+
+    Instead of post-hoc dilation, the circle algorithm itself emits extra
+    adjacent pixels whenever a diagonal step occurs — one offset along each
+    axis of change — so that no face of any boundary pixel is left exposed.
+    """
+    if r <= 0:
+        return [(xc, yc)]
+
+    x, y, err = -r, 0, 2 - 2 * r
+    boundary = set()
+
+    def add_octants(cx, cy):
+        """Emit the 8 symmetric boundary points for the current (x, y)."""
+        boundary.update([
+            (xc - cx, yc + cy),
+            (xc + cy, yc - cx),
+            (xc - cy, yc - cx),
+            (xc + cx, yc + cy),
+            (xc + cx, yc - cy),
+            (xc - cy, yc + cx),
+            (xc + cy, yc + cx),
+            (xc - cx, yc - cy),
+        ])
+
+    def add_double_step_neighbors(prev_x, prev_y, new_x, new_y):
+        """
+        When both x and y change (diagonal step), emit extra pixels to cover
+        all exposed faces — analogous to double_step_line emitting
+        (x0, y0+sy) on horizontal steps and (x2+sx, y0) on vertical steps.
+
+        For each octant reflection we add the pixel that shares a face along
+        the axis that *didn't* move yet (the intermediate positions).
+        """
+        # Intermediate with only-Y-changed (x stays at prev)
+        boundary.update([
+            (xc - prev_x, yc + new_y),
+            (xc + new_y, yc - prev_x),
+            (xc - new_y, yc - prev_x),
+            (xc + prev_x, yc + new_y),
+            (xc + prev_x, yc - new_y),
+            (xc - new_y, yc + prev_x),
+            (xc + new_y, yc + prev_x),
+            (xc - prev_x, yc - new_y),
+        ])
+        # Intermediate with only-X-changed (y stays at prev)
+        boundary.update([
+            (xc - new_x, yc + prev_y),
+            (xc + prev_y, yc - new_x),
+            (xc - prev_y, yc - new_x),
+            (xc + new_x, yc + prev_y),
+            (xc + new_x, yc - prev_y),
+            (xc - prev_y, yc + new_x),
+            (xc + prev_y, yc + new_x),
+            (xc - new_x, yc - prev_y),
+        ])
+
+    while abs(x) >= y:
+        add_octants(x, y)
+
+        prev_x, prev_y = x, y
+        curr_err = err
+
+        stepped_y = False
+        stepped_x = False
+
+        if curr_err <= y:
+            y += 1
+            err += y * 2 + 1
+            stepped_y = True
+
+        if curr_err > prev_x or err > y:
+            x += 1
+            err += x * 2 + 1
+            stepped_x = True
+
+        # Diagonal step detected — add double-step neighbor pixels
+        if stepped_x and stepped_y:
+            add_double_step_neighbors(prev_x, prev_y, x, y)
+
+        add_octants(x, y)
+
+    # Fill scanlines from boundary
+    y_spans = {}
+    for px, py in boundary:
+        if py not in y_spans:
+            y_spans[py] = [px, px]
+        else:
+            if px < y_spans[py][0]:
+                y_spans[py][0] = px
+            if px > y_spans[py][1]:
+                y_spans[py][1] = px
+
+    points = []
+    for py, (min_x, max_x) in y_spans.items():
+        for px in range(min_x, max_x + 1):
+            points.append((px, py))
     return points
 
 

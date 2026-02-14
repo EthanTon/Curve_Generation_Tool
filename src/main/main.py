@@ -1,303 +1,224 @@
-import util.dubinsUtil as dubinUtil
-import util.trackUtil as trackUtil
-import util.pantographUtil as pantographUtil
-import util.elevationUtil as elevUtil
-import util.exportUtil as exportUtil
+import json
+import sys
+import argparse
+
 import numpy as np
 
-
-def _nearest_elevation(pt, elevation_map, default=0):
-    """Spiral search for the nearest known ground elevation."""
-    for r in range(1, 20):
-        for dx in range(-r, r + 1):
-            for dz in range(-r, r + 1):
-                if abs(dx) != r and abs(dz) != r:
-                    continue
-                neighbour = (pt[0] + dx, pt[1] + dz)
-                if neighbour in elevation_map:
-                    return elevation_map[neighbour]
-    return default
+from trackAssembler import assemble_track, assemble_path, DEFAULT_CONFIG
+from util.exportUtil import export_schematic
+from util.elevationUtil import generate_elevation_lookup
+from util.blockUtil import _norm_coord
 
 
-def compute_slope_for_segment(path_length, y_start, y_end, slope_min, offset=0):
-    effective_y_start = y_start - offset  # actual elevation with deficit
-    total_dz = y_end - effective_y_start  # signed total change needed
-    abs_dz = abs(total_dz)
-
-    if abs_dz == 0:
-        return None, y_end, None, 0, effective_y_start
-
-    half_length = path_length / 2
-
-    # 1) Try to achieve the full change in the first half of the segment
-    half_slope = half_length / abs_dz
-    if half_slope >= slope_min:
-        return half_slope, y_end, None, 0, effective_y_start
-
-    # 2) Half isn't enough – try using the full segment length
-    full_slope = path_length / abs_dz
-    if full_slope >= slope_min:
-        return full_slope, y_end, None, 0, effective_y_start
-
-    # 3) Cannot reach target even at steepest allowed slope
-    max_dz = int(path_length // slope_min)
-    if total_dz > 0:
-        realised_y_end = effective_y_start + max_dz
-    else:
-        realised_y_end = effective_y_start - max_dz
-
-    remaining_offset = y_end - realised_y_end  # deficit to carry forward
-
-    direction = "up" if total_dz > 0 else "down"
-    err = (
-        f"Cannot reach elevation {y_end} from effective start {effective_y_start} "
-        f"({direction} {abs_dz}m) over path length {path_length}. "
-        f"At steepest slope ({slope_min} steps/m), max change is {max_dz}m. "
-        f"Carrying offset of {remaining_offset} to next segment."
-    )
-    return slope_min, realised_y_end, err, remaining_offset, effective_y_start
-
-
-def parse_points(points, radius=30.0, base_width=13, track_width=7, slope_min=35,
-                 pantograph_interval=45):
+def parse_input(filepath):
     """
-    Process an ordered list of points and generate segments from consecutive pairs.
+    Parse a JSON input file containing control points, elevation, and config.
 
-    Each point is:
-        ((x, z, angle), y)
+    Expected JSON format:
+    {
+        "control_points": [
+            [x, z, angle],
+            [x, z, angle],
+            ...
+        ],
+        "elevation": [
+            [x, z, elevation],
+            [x, z, elevation],
+            ...
+        ],
+        "config": {
+            "base_width": 15,
+            "track_width": 5,
+            "turn_radius": 20,
+            "catenary_interval": 30,
+            "catenary_offset": 0,
+            "base_block": "minecraft:gray_wool",
+            "brim_block": "minecraft:gray_wool",
+            "elevation_interval": 1
+        },
+        "output": "my_track.schem"
+    }
 
-    where (x, z, angle) is the pose and y is the elevation.
+    control_points are required. Each is (x, z, angle) where angle is
+    the heading in degrees (converted to radians internally).
 
-    Returns:
-        (results, errors)
+    elevation is optional. Each entry is (x, z, elevation) where the
+    2D point should lie on or near the center path. Consecutive pairs
+    define linear elevation ramps.
+
+    config and output are optional.
     """
-    if len(points) < 2:
-        raise ValueError("Need at least 2 points to form a segment.")
+    with open(filepath, "r") as f:
+        data = json.load(f)
 
-    results = []
-    errors = []
-    offset = 0
+    if "control_points" not in data:
+        raise ValueError("Input JSON must contain a 'control_points' array.")
 
-    for idx in range(len(points) - 1):
-        start_pose, start_y = points[idx]
-        end_pose, end_y = points[idx + 1]
+    control_points = [
+        (pt[0], pt[1], pt[2] * np.pi / 180) for pt in data["control_points"]
+    ]
 
-        # --- Dubins path --------------------------------------------------
-        center_track = dubinUtil.int_dubins_path(start_pose, end_pose, radius)
-        path_length = len(center_track)
+    elevation = None
+    if "elevation" in data and data["elevation"]:
+        elevation = [(ep[0], ep[1], ep[2]) for ep in data["elevation"]]
 
-        # --- Slope calculation (with offset from prior segments) ----------
-        actual_slope, realised_y_end, err_msg, offset, effective_y_start = (
-            compute_slope_for_segment(
-                path_length, start_y, end_y, slope_min, offset
-            )
-        )
+    config = data.get("config", None)
+    output = data.get("output", "output.schem")
 
-        if err_msg is not None:
-            errors.append((idx, err_msg))
+    return control_points, elevation, config, output
 
-        # --- Geometry (no pantograph – applied later on combined curve) ----
-        base, track = trackUtil.track(
-            center_track, start_pose, end_pose, base_width, track_width,
-        )
 
-        # --- Elevation mask -----------------------------------------------
-        abs_dz = abs(realised_y_end - effective_y_start)
-        if abs_dz > 0:
-            pts = np.asarray(center_track, dtype=float)
-            total_dist = np.sum(
-                np.linalg.norm(np.diff(pts, axis=0), axis=1)
-            ) if len(pts) > 1 else 1.0
-            step_size = total_dist / ((abs_dz + 1) * np.sqrt(2))
-        else:
-            step_size = len(center_track) + 1
+def build_path_blocks(path, elevation_lut=None, block="minecraft:stone"):
+    """
+    Convert a Dubins path into a blocks_dict with a single block type.
 
-        elevation_mask = elevUtil.generate_elevation_mask(
-            center_track,
-            base_width,
-            list(base[0]),
-            step_size=step_size,
-            start_idx=0,
-            end_idx=-1,
-            z_start=effective_y_start,
-            z_end=realised_y_end,
-        )
+    Each unique (x, z) in the path becomes one block.  When
+    *elevation_lut* is provided the Y coordinate is looked up from
+    the table; otherwise Y defaults to 0.
+    """
+    blocks_dict = {}
+    seen = set()
+    for pt in path:
+        xz = (_norm_coord(pt[0]), _norm_coord(pt[1]))
+        if xz in seen:
+            continue
+        seen.add(xz)
+        x, z = xz
+        y = elevation_lut.get(xz, 0) if elevation_lut else 0
+        blocks_dict.setdefault(block, []).append((x, y, z))
+    return blocks_dict
 
-        results.append(
-            {
-                "index": idx,
-                "start": points[idx],
-                "end": points[idx + 1],
-                "y_start": start_y,
-                "y_start_effective": effective_y_start,
-                "y_end_target": end_y,
-                "y_end_realised": realised_y_end,
-                "offset_remaining": offset,
-                "slope_min": slope_min,
-                "path_length": path_length,
-                "center_track": center_track,
-                "base": base,
-                "track": track,
-                "elevation_mask": elevation_mask,
-            }
-        )
 
-    return results, errors
+def first_path_offset(path, blocks_dict, elevation_lut=None):
+    """
+    Compute a schematic offset so that the paste point aligns with the
+    first path point at 1 Y level above its elevation.
+
+    create_schematic normalises coordinates by subtracting the bounding-
+    box minimum, so a block at world (wx, wy, wz) ends up at local
+    (wx - min_x, wy - min_y, wz - min_z).  The Sponge Schematic
+    ``Offset`` is added to the player position to find where local
+    (0, 0, 0) goes, meaning the block appears at
+    ``paste_pos + offset + local``.
+
+    To land the first path point at ``(paste_x, paste_y + 1, paste_z)``
+    we need::
+
+        offset = ( -(first_x - min_x),
+                   -(first_y - min_y) + 1,
+                   -(first_z - min_z) )
+    """
+    # First path point
+    pt = path[0]
+    fx = _norm_coord(pt[0])
+    fz = _norm_coord(pt[1])
+    fy = elevation_lut.get((fx, fz), 0) if elevation_lut else 0
+
+    # Bounding-box minimums across every block in the dict
+    all_positions = [pos for positions in blocks_dict.values() for pos in positions]
+    min_x = min(p[0] for p in all_positions)
+    min_y = min(p[1] for p in all_positions)
+    min_z = min(p[2] for p in all_positions)
+
+    return (-(fx - min_x), -(fy - min_y) - 1, -(fz - min_z))
 
 
 def main():
-    # Define the path as an ordered list of points: ((x, z, angle), y)
-    points = [
-        ((0, 0, 0), 8),
-        ((40, 100, np.pi / 3), 11),
-        ((170, 170, np.pi / 2), 13),
-        ((170, 250, np.pi / 2), 13)
-    ]
-
-    results, errors = parse_points(
-        points, radius=50.0, base_width=13, track_width=7, slope_min=35,
-        pantograph_interval=45,
+    parser = argparse.ArgumentParser(
+        description="Generate a Minecraft track schematic from control points."
+    )
+    parser.add_argument(
+        "input", help="JSON file with control_points (and optional elevation / config)"
+    )
+    parser.add_argument(
+        "--path-only",
+        action="store_true",
+        help="Export only the Dubins path as blocks instead of the full track.",
+    )
+    parser.add_argument(
+        "--no-elevation",
+        action="store_true",
+        help="Ignore elevation data (only meaningful with --path-only).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Override the export filename (takes priority over the JSON 'output' field).",
     )
 
-    # ---- Report per-segment diagnostics ----------------------------------
-    for res in results:
-        status = "OK"
-        if res["y_end_realised"] != res["y_end_target"]:
-            status = (
-                f"ADJUSTED (target={res['y_end_target']}, "
-                f"realised={res['y_end_realised']}, "
-                f"offset_remaining={res['offset_remaining']})"
+    args = parser.parse_args()
+
+    control_points, elevation, config, output = parse_input(args.input)
+
+    if args.output:
+        output = args.output
+
+    cfg = dict(DEFAULT_CONFIG)
+    if config:
+        cfg.update(config)
+
+    print(f"Parsed {len(control_points)} control points")
+    if elevation:
+        print(f"Parsed {len(elevation)} elevation control points")
+    if config:
+        print(f"Config overrides: {list(config.keys())}")
+
+    # ------------------------------------------------------------------ #
+    # Path-only mode: export just the Dubins path                         #
+    # ------------------------------------------------------------------ #
+    if args.path_only:
+        path, start, end = assemble_path(control_points, cfg["turn_radius"])
+        print(f"Dubins path: {len(path)} points")
+
+        elevation_lut = None
+        if elevation and not args.no_elevation:
+            path_set = {(_norm_coord(pt[0]), _norm_coord(pt[1])) for pt in path}
+            elevation_lut = generate_elevation_lookup(
+                path,
+                1,
+                path_set,
+                step_size=cfg["elevation_interval"],
+                elevation_control_points=elevation,
             )
+            print("Applied elevation to path")
 
-        eff = ""
-        if res["y_start_effective"] != res["y_start"]:
-            eff = f" (effective={res['y_start_effective']})"
+        blocks_dict = build_path_blocks(path, elevation_lut)
+        offset = first_path_offset(path, blocks_dict, elevation_lut)
 
-        print(
-            f"Segment {res['index']}: "
-            f"path_len={res['path_length']}, "
-            f"y {res['y_start']}{eff} → {res['y_end_realised']}, "
-            f"status={status}"
+        total_blocks = sum(len(pos) for pos in blocks_dict.values())
+        print(f"Assembled {total_blocks} path blocks")
+
+        export_schematic(blocks_dict, filename=output, offset=offset)
+        print(f"Exported path schematic to {output}")
+        return
+
+    # ------------------------------------------------------------------ #
+    # Full track mode (default)                                           #
+    # ------------------------------------------------------------------ #
+    blocks_dict = assemble_track(control_points, elevation, config)
+
+    # Derive the path again so we can compute the offset
+    path, _, _ = assemble_path(control_points, cfg["turn_radius"])
+    # Build an elevation LUT for the offset lookup
+    if elevation:
+        path_set = {(_norm_coord(pt[0]), _norm_coord(pt[1])) for pt in path}
+        elev_lut = generate_elevation_lookup(
+            path,
+            1,
+            path_set,
+            step_size=cfg["elevation_interval"],
+            elevation_control_points=elevation,
         )
+    else:
+        elev_lut = None
+    offset = first_path_offset(path, blocks_dict, elev_lut)
 
-    if errors:
-        print("\n⚠  Elevation errors:")
-        for seg_idx, msg in errors:
-            print(f"  Segment {seg_idx}: {msg}")
+    total_blocks = sum(len(positions) for positions in blocks_dict.values())
+    print(f"Assembled {total_blocks} blocks across {len(blocks_dict)} block types")
 
-    # ---- Merge all segments ----------------------------------------------
-    combined_base = set()
-    combined_brim = set()
-    combined_elevation = {}
-    combined_center_track = []
-    combined_track_center = []          # mixed (for export rail rendering)
-    combined_track_center_left = []     # left track centre  (for pantograph)
-    combined_track_center_right = []    # right track centre (for pantograph)
-    combined_rail0 = []
-    combined_rail1 = []
-
-    for res in results:
-        base_set, brim_set = res["base"]
-        combined_base.update(map(tuple, base_set))
-        combined_brim.update(map(tuple, brim_set))
-
-        # Accumulate the raw centre-line for the pantograph pass
-        combined_center_track.extend(res["center_track"])
-
-        track = res["track"]
-        # track[0] is (left_ordered_with_dirs, right_ordered_with_dirs)
-        track_center_pair = track[0]
-
-        # Separate left / right track centres for pantograph intersection
-        if (isinstance(track_center_pair, (list, tuple))
-                and len(track_center_pair) == 2):
-            left_tc, right_tc = track_center_pair
-            if isinstance(left_tc, (list, tuple)):
-                combined_track_center_left.extend(left_tc)
-            if isinstance(right_tc, (list, tuple)):
-                combined_track_center_right.extend(right_tc)
-
-        # Also build the mixed list expected by the export rail renderer
-        for sublist in track[0]:
-            if (
-                isinstance(sublist, (list, tuple))
-                and len(sublist) > 0
-                and isinstance(sublist[0], (list, tuple))
-            ):
-                combined_track_center.extend(sublist)
-            else:
-                combined_track_center.append(sublist)
-
-        combined_rail0.extend(track[1][0])
-        combined_rail0.extend(track[1][1])
-
-        combined_rail1.extend(track[2][0])
-        combined_rail1.extend(track[2][1])
-
-        # Merge elevation mask into a flat dict
-        for mask_idx, point_map in res["elevation_mask"].items():
-            for pt, y in point_map.items():
-                combined_elevation[pt] = y
-
-    # ---- Pantograph (applied once on the full combined curve) -------------
-    base_width = 13  # must match the value used during segment generation
-    (
-        combined_poles,
-        pole_lines,
-        cross_lines,
-        overhead_wire_pixels,
-        tc1_intersections,
-        tc2_intersections,
-        wire1_pixels,
-        wire2_pixels,
-    ) = pantographUtil.apply_pantograph(
-        combined_center_track,
-        combined_base,
-        base_width,
-        combined_elevation,
-        track_outer1=combined_rail0,
-        track_outer2=combined_rail1,
-        track_center1=combined_track_center_left,
-        track_center2=combined_track_center_right,
-        pantograph_interval=45,
-    )
-
-    # Ensure every pole position has a ground elevation entry.
-    for left, right in combined_poles:
-        for p in (left, right):
-            key = (int(round(p[0])), int(round(p[1])))
-            if key not in combined_elevation:
-                combined_elevation[key] = _nearest_elevation(
-                    key, combined_elevation
-                )
-
-    # Re-wrap elevation into the {0: {...}} format expected by export
-    combined_elevation_wrapped = {0: combined_elevation}
-
-    exportUtil.export_full_track(
-        combined_base,
-        combined_brim,
-        combined_track_center,
-        combined_rail0,
-        combined_rail1,
-        combined_elevation_wrapped,
-        filename="track.schem",
-        poles=combined_poles,
-        cross_lines=cross_lines,
-        overhead_wire_pixels=overhead_wire_pixels,
-        wire1_pixels=wire1_pixels,
-        wire2_pixels=wire2_pixels,
-        pantograph_elevation=pole_lines,
-    )
-
-    print(f"\nExported {len(combined_base)} blocks to track.schem")
-    print(f"Total pantograph poles: {len(combined_poles)} pairs")
-    print(f"Cross-lines: {len(cross_lines)}")
-    print(f"Overhead wire pixels: {len(overhead_wire_pixels)}")
-    print(f"Wire 1 pixels: {len(wire1_pixels)}")
-    print(f"Wire 2 pixels: {len(wire2_pixels)}")
-    print(f"Track 1 intersections: {len(tc1_intersections)}")
-    print(f"Track 2 intersections: {len(tc2_intersections)}")
+    export_schematic(blocks_dict, filename=output, offset=offset)
+    print(f"Exported schematic to {output}")
 
 
 if __name__ == "__main__":

@@ -3,16 +3,7 @@
 
 import numpy as np
 from util.shapeUtil import bresenham_arc, bresenham_line
-
-
-def ortho(vect2d):
-    """Computes an orthogonal vector to the one given"""
-    return np.array((-vect2d[1], vect2d[0]))
-
-
-def dist(pt_a, pt_b):
-    """Euclidian distance between two (x, y) points"""
-    return ((pt_a[0] - pt_b[0]) ** 2 + (pt_a[1] - pt_b[1]) ** 2) ** 0.5
+from util.pathUtil import dist, ortho
 
 
 def all_options(start, end, radius, sort=False):
@@ -110,7 +101,7 @@ def lrl(start, end, center_0, center_2, radius):
     dist_intercenter = dist(center_0, center_2)
     intercenter = (center_2 - center_0) / 2
     psia = np.arctan2(intercenter[1], intercenter[0])
-    if 2 * radius < dist_intercenter > 4 * radius:
+    if not (2 * radius <= dist_intercenter <= 4 * radius):
         return (float("inf"), (0, 0, 0), False)
     gamma = 2 * np.arcsin(dist_intercenter / (4 * radius))
     beta_0 = (psia - start[2] + np.pi / 2 + (np.pi - gamma) / 2) % (2 * np.pi)
@@ -123,7 +114,7 @@ def rlr(start, end, center_0, center_2, radius):
     dist_intercenter = dist(center_0, center_2)
     intercenter = (center_2 - center_0) / 2
     psia = np.arctan2(intercenter[1], intercenter[0])
-    if 2 * radius < dist_intercenter > 4 * radius:
+    if not (2 * radius <= dist_intercenter <= 4 * radius):
         return (float("inf"), (0, 0, 0), False)
     gamma = 2 * np.arcsin(dist_intercenter / (4 * radius))
     beta_0 = -((-psia + (start[2] + np.pi / 2) + (np.pi - gamma) / 2) % (2 * np.pi))
@@ -258,7 +249,7 @@ def int_generate_points_curve(start, end, path, radius):
             np.rint(center_2[1]),
             radius,
             np.rint(fin[:2]),
-            np.rint(end),
+            np.rint(end[:2]),
             path[1] > 0,
         )
     )
@@ -278,9 +269,9 @@ def generate_points_curve(start, end, path, radius, point_separation):
     points = []
     for x in np.arange(0, total, point_separation):
         if x < abs(path[0]) * radius:  # First turn
-            points.append(circle_arc(start, path[0], center_0, x))
+            points.append(circle_arc(start, path[0], center_0, radius, x))
         elif x > total - abs(path[1]) * radius:  # Last turn
-            points.append(circle_arc(end, path[1], center_2, x - total))
+            points.append(circle_arc(end, path[1], center_2, radius, x - total))
         else:  # Middle Turn
             angle = psi_0 - np.sign(path[0]) * (x / radius - abs(path[0]))
             vect = np.array([np.cos(angle), np.sin(angle)])
