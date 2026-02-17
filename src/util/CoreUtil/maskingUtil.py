@@ -1,6 +1,6 @@
 import numpy as np
 
-from util.pathUtil import path_tangent
+from .pathUtil import path_tangent
 
 def mask_all(path, boundaries, base_width, base):
     pts = np.asarray(path, dtype=float)

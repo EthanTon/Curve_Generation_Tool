@@ -2,8 +2,8 @@
 # Create pixelated Dubins path implementation in Python
 
 import numpy as np
-from util.shapeUtil import bresenham_arc, bresenham_line
-from util.pathUtil import dist, ortho
+from .shapeUtil import bresenham_arc, bresenham_line
+from .pathUtil import dist, ortho
 
 
 def all_options(start, end, radius, sort=False):
@@ -131,49 +131,105 @@ def find_center(point, side, radius):
     )
 
 
+def _to_pt(x, y=None):
+    """Convert to plain (int, int) tuple consistently."""
+    if y is None:
+        return (int(round(x[0])), int(round(x[1])))
+    return (int(round(x)), int(round(y)))
+
+
+def _trim_to_junction(points, junction, at_end=True):
+    """Trim a segment's points so it stops at the junction point.
+    If at_end=True, finds the LAST occurrence of junction and drops everything after.
+    If at_end=False, finds the FIRST occurrence and drops everything before."""
+    if not points:
+        return points
+    if at_end:
+        # Find last occurrence of junction
+        for i in range(len(points) - 1, -1, -1):
+            if points[i] == junction:
+                return points[: i + 1]
+        # Junction not found - append it
+        points.append(junction)
+        return points
+    else:
+        # Find first occurrence of junction
+        for i in range(len(points)):
+            if points[i] == junction:
+                return points[i:]
+        # Junction not found - prepend it
+        return [junction] + points
+
+
 def int_generate_points_straight(start, end, path, radius):
+    EPS = 1e-6
     center_0 = find_center(start, "L" if path[0] > 0 else "R", radius)
     center_2 = find_center(end, "L" if path[1] > 0 else "R", radius)
 
-    # We first need to find the points where the straight segment starts
-    if abs(path[0]) > 0:
+    start_pt = _to_pt(start[:2])
+    end_pt = _to_pt(end[:2])
+
+    # Find where the straight segment starts
+    if abs(path[0]) > EPS:
         angle = start[2] + (abs(path[0]) - np.pi / 2) * np.sign(path[0])
         ini = center_0 + radius * np.array([np.cos(angle), np.sin(angle)])
     else:
-        ini = np.array(start[:2])
+        ini = np.array(start[:2], dtype=float)
 
-    # We then identify its end
-    if abs(path[1]) > 0:
+    # Find where the straight segment ends
+    if abs(path[1]) > EPS:
         angle = end[2] + (-abs(path[1]) - np.pi / 2) * np.sign(path[1])
         fin = center_2 + radius * np.array([np.cos(angle), np.sin(angle)])
     else:
-        fin = np.array(end[:2])
+        fin = np.array(end[:2], dtype=float)
 
-    # Generate all the points using Bresenham algorithms
-    points = bresenham_arc(
-        np.rint(center_0[0]),
-        np.rint(center_0[1]),
-        radius,
-        np.rint(start[:2]),
-        np.rint(ini),
-        (path[0] > 0),
-    )
-    points.extend(
-        bresenham_line(
-            np.rint(ini[0]), np.rint(ini[1]), np.rint(fin[0]), np.rint(fin[1])
-        )
-    )
-    points.extend(
-        bresenham_arc(
-            np.rint(center_2[0]),
-            np.rint(center_2[1]),
+    ini_pt = _to_pt(ini)
+    fin_pt = _to_pt(fin)
+
+    # Build segments, trimming each to its boundary
+    points = []
+
+    # First arc
+    if abs(path[0]) > EPS:
+        arc0 = bresenham_arc(
+            round(center_0[0]),
+            round(center_0[1]),
             radius,
-            np.rint(fin),
-            np.rint(end[:2]),
+            start_pt,
+            ini_pt,
+            (path[0] > 0),
+        )
+        arc0 = _trim_to_junction(arc0, ini_pt, at_end=True)
+        points.extend(arc0)
+
+    # Straight segment - skip first point if it duplicates arc0's last
+    line = bresenham_line(ini_pt[0], ini_pt[1], fin_pt[0], fin_pt[1])
+    if points and line and line[0] == points[-1]:
+        line = line[1:]
+    points.extend(line)
+
+    # Last arc - skip first point if it duplicates line's last
+    if abs(path[1]) > EPS:
+        arc2 = bresenham_arc(
+            round(center_2[0]),
+            round(center_2[1]),
+            radius,
+            fin_pt,
+            end_pt,
             (path[1] > 0),
         )
-    )
-    return np.array(list(dict.fromkeys(points)))
+        arc2 = _trim_to_junction(arc2, fin_pt, at_end=False)
+        if points and arc2 and arc2[0] == points[-1]:
+            arc2 = arc2[1:]
+        points.extend(arc2)
+
+    # Ensure start is first and end is last
+    if not points or points[0] != start_pt:
+        points.insert(0, start_pt)
+    if points[-1] != end_pt:
+        points.append(end_pt)
+
+    return np.array(points)
 
 
 def generate_points_straight(start, end, path, radius, point_separation=0.1):
@@ -210,6 +266,7 @@ def generate_points_straight(start, end, path, radius, point_separation=0.1):
 
 
 def int_generate_points_curve(start, end, path, radius):
+    EPS = 1e-6
     center_0 = find_center(start, "L" if path[0] > 0 else "R", radius)
     center_2 = find_center(end, "L" if path[1] > 0 else "R", radius)
     intercenter = dist(center_0, center_2)
@@ -218,42 +275,66 @@ def int_generate_points_curve(start, end, path, radius):
     ) * (4 * radius**2 - (intercenter / 2) ** 2) ** 0.5
 
     ini = center_1 + radius * (center_0 - center_1) / dist(center_0, center_1)
-
     fin = center_1 + radius * (center_2 - center_1) / dist(center_2, center_1)
 
-    psi_0 = np.arctan2((center_1 - center_0)[1], (center_1 - center_0)[0]) - np.pi
+    start_pt = _to_pt(start[:2])
+    end_pt = _to_pt(end[:2])
+    ini_pt = _to_pt(ini)
+    fin_pt = _to_pt(fin)
 
-    points = bresenham_arc(
-        np.rint(center_0[0]),
-        np.rint(center_0[1]),
-        radius,
-        np.rint(start[:2]),
-        np.rint(ini),
-        path[0] > 0,
-    )
+    points = []
 
-    points.extend(
-        bresenham_arc(
-            np.rint(center_1[0]),
-            np.rint(center_1[1]),
+    # First arc
+    if abs(path[0]) > EPS:
+        arc0 = bresenham_arc(
+            round(center_0[0]),
+            round(center_0[1]),
             radius,
-            np.rint(ini[:2]),
-            np.rint(fin[:2]),
+            start_pt,
+            ini_pt,
+            path[0] > 0,
+        )
+        arc0 = _trim_to_junction(arc0, ini_pt, at_end=True)
+        points.extend(arc0)
+
+    # Middle arc - skip first point if it duplicates arc0's last
+    if abs(path[2]) > EPS:
+        arc1 = bresenham_arc(
+            round(center_1[0]),
+            round(center_1[1]),
+            radius,
+            ini_pt,
+            fin_pt,
             path[0] < 0,
         )
-    )
+        arc1 = _trim_to_junction(arc1, ini_pt, at_end=False)
+        arc1 = _trim_to_junction(arc1, fin_pt, at_end=True)
+        if points and arc1 and arc1[0] == points[-1]:
+            arc1 = arc1[1:]
+        points.extend(arc1)
 
-    points.extend(
-        bresenham_arc(
-            np.rint(center_2[0]),
-            np.rint(center_2[1]),
+    # Last arc - skip first point if it duplicates arc1's last
+    if abs(path[1]) > EPS:
+        arc2 = bresenham_arc(
+            round(center_2[0]),
+            round(center_2[1]),
             radius,
-            np.rint(fin[:2]),
-            np.rint(end[:2]),
+            fin_pt,
+            end_pt,
             path[1] > 0,
         )
-    )
-    return np.array(list(dict.fromkeys(points)))
+        arc2 = _trim_to_junction(arc2, fin_pt, at_end=False)
+        if points and arc2 and arc2[0] == points[-1]:
+            arc2 = arc2[1:]
+        points.extend(arc2)
+
+    # Ensure start is first and end is last
+    if not points or points[0] != start_pt:
+        points.insert(0, start_pt)
+    if points[-1] != end_pt:
+        points.append(end_pt)
+
+    return np.array(points)
 
 
 def generate_points_curve(start, end, path, radius, point_separation):

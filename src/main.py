@@ -5,9 +5,9 @@ import argparse
 import numpy as np
 
 from trackAssembler import assemble_track, assemble_path, DEFAULT_CONFIG
-from util.exportUtil import export_schematic
-from util.elevationUtil import generate_elevation_lookup
-from util.blockUtil import _norm_coord
+from util.CoreUtil.exportUtil import export_schematic, export_world
+from util.TrackUtil.elevationUtil import generate_elevation_lookup
+from util.TrackUtil.blockUtil import _norm_coord
 
 
 def parse_input(filepath):
@@ -146,6 +146,18 @@ def main():
         default=None,
         help="Override the export filename (takes priority over the JSON 'output' field).",
     )
+    parser.add_argument(
+        "--world",
+        default=None,
+        metavar="WORLD_DIR",
+        help="Export directly into an existing Minecraft world save directory instead of a .schem file.",
+    )
+    parser.add_argument(
+        "--dimension",
+        default="overworld",
+        choices=["overworld", "nether", "end"],
+        help="Target dimension when using --world (default: overworld).",
+    )
 
     args = parser.parse_args()
 
@@ -169,6 +181,7 @@ def main():
     # ------------------------------------------------------------------ #
     if args.path_only:
         path, start, end = assemble_path(control_points, cfg["turn_radius"])
+        path = list(path)  # materialise – path is iterated several times below
         print(f"Dubins path: {len(path)} points")
 
         elevation_lut = None
@@ -184,41 +197,52 @@ def main():
             print("Applied elevation to path")
 
         blocks_dict = build_path_blocks(path, elevation_lut)
-        offset = first_path_offset(path, blocks_dict, elevation_lut)
 
         total_blocks = sum(len(pos) for pos in blocks_dict.values())
         print(f"Assembled {total_blocks} path blocks")
 
-        export_schematic(blocks_dict, filename=output, offset=offset)
-        print(f"Exported path schematic to {output}")
+        if args.world:
+            export_world(blocks_dict, args.world, dimension=args.dimension)
+            print(f"Exported path to world {args.world} ({args.dimension})")
+        else:
+            offset = first_path_offset(path, blocks_dict, elevation_lut)
+            export_schematic(blocks_dict, filename=output, offset=offset)
+            print(f"Exported path schematic to {output}")
         return
 
     # ------------------------------------------------------------------ #
     # Full track mode (default)                                           #
     # ------------------------------------------------------------------ #
-    blocks_dict = assemble_track(control_points, elevation, config)
+    path, start, end = assemble_path(control_points, cfg["turn_radius"])
+    path = list(path)  # materialise – path is iterated several times below
+    print(f"Dubins path: {len(path)} points")
 
-    # Derive the path again so we can compute the offset
-    path, _, _ = assemble_path(control_points, cfg["turn_radius"])
-    # Build an elevation LUT for the offset lookup
+    # Elevation
+    elevation_lut = None
     if elevation:
         path_set = {(_norm_coord(pt[0]), _norm_coord(pt[1])) for pt in path}
-        elev_lut = generate_elevation_lookup(
+        elevation_lut = generate_elevation_lookup(
             path,
             1,
             path_set,
             step_size=cfg["elevation_interval"],
             elevation_control_points=elevation,
         )
-    else:
-        elev_lut = None
-    offset = first_path_offset(path, blocks_dict, elev_lut)
+        print("Applied elevation")
+
+    # Track assembly
+    blocks_dict = assemble_track(control_points, elevation, config)
 
     total_blocks = sum(len(positions) for positions in blocks_dict.values())
     print(f"Assembled {total_blocks} blocks across {len(blocks_dict)} block types")
 
-    export_schematic(blocks_dict, filename=output, offset=offset)
-    print(f"Exported schematic to {output}")
+    if args.world:
+        export_world(blocks_dict, args.world, dimension=args.dimension)
+        print(f"Exported to world {args.world} ({args.dimension})")
+    else:
+        offset = first_path_offset(path, blocks_dict, elevation_lut)
+        export_schematic(blocks_dict, filename=output, offset=offset)
+        print(f"Exported schematic to {output}")
 
 
 if __name__ == "__main__":

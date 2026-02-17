@@ -1,10 +1,12 @@
-from util.shapeUtil import (
+from ..CoreUtil.shapeUtil import (
     bresenham_filled_circle,
     bresenham_line,
     bresenham_filled_circle_stepped,
     step_line,
     double_step_line
 )
+
+from ..CoreUtil.pathUtil import weighted_pca_orthogonal
 import numpy as np
 
 
@@ -227,19 +229,6 @@ def line_leaves_bound(line, bound):
         if pt not in bound:
             return True
     return False
-
-
-def weighted_pca_orthogonal(path, index, sigma=2):
-    pts = np.array(path, dtype=float)
-    indices = np.arange(len(path))
-    weights = np.exp(-0.5 * ((indices - index) / sigma) ** 2)
-    weighted_center = np.average(pts, axis=0, weights=weights)
-    centered = pts - weighted_center
-    W = np.diag(weights)
-    cov = (centered.T @ W @ centered) / weights.sum()
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-    tangent = eigenvectors[:, np.argmax(eigenvalues)]
-    return (-tangent[1], tangent[0])
 
 
 def determine_base_edge(path, width, base):

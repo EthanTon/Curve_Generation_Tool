@@ -1,6 +1,6 @@
 import numpy as np
 
-from util.shapeUtil import (
+from ..CoreUtil.shapeUtil import (
     bresenham_circle,
     bresenham_circle_4connected,
     bresenham_filled_arc,
@@ -9,6 +9,8 @@ from util.shapeUtil import (
     bresenham_filled_circle_stepped,
     bresenham_filled_arc_stepped,
 )
+
+from ..CoreUtil.pathUtil import add_directions_to_points
 
 
 def track(path, start, end, base_width, track_width):
@@ -29,74 +31,6 @@ def generate_brim(path, base_width, base):
             & valid_area
         )
     return brim
-
-
-def _center_path_tangents(center_path, window=3):
-    """Precompute unit tangent vectors for every point on a center path."""
-    cp = np.asarray(center_path, dtype=float)
-    n = len(cp)
-    tangents = np.empty_like(cp)
-    for i in range(n):
-        lo = max(i - window, 0)
-        hi = min(i + window, n - 1)
-        t = cp[hi] - cp[lo]
-        length = np.linalg.norm(t)
-        tangents[i] = t / length if length > 0 else np.array([1.0, 0.0])
-    return cp, tangents
-
-
-def _add_directions_to_points(points, center_path=None):
-    """
-    Assigns a unit tangent direction to each point.
-
-    If *center_path* is provided, directions are derived from the nearest
-    point on that path (smooth, stable).  Otherwise a simple finite-
-    difference fallback is used on *points* itself.
-    """
-    if len(points) == 0:
-        return []
-
-    pts = np.asarray(points, dtype=float)
-
-    if center_path is not None and len(center_path) >= 2:
-        cp, tangents = _center_path_tangents(center_path)
-
-        chunk = max(1, int(25_000_000 / max(len(cp), 1)))
-        nearest_idx = np.empty(len(pts), dtype=int)
-        for lo in range(0, len(pts), chunk):
-            hi = min(lo + chunk, len(pts))
-            diffs = pts[lo:hi, np.newaxis, :] - cp[np.newaxis, :, :]
-            dists_sq = np.sum(diffs ** 2, axis=2)
-            nearest_idx[lo:hi] = np.argmin(dists_sq, axis=1)
-
-        result = []
-        for i in range(len(pts)):
-            t = tangents[nearest_idx[i]]
-            result.append((
-                float(pts[i][0]),
-                float(pts[i][1]),
-                float(t[0]),
-                float(t[1]),
-            ))
-        return result
-
-    if len(points) == 1:
-        return [(float(pts[0][0]), float(pts[0][1]), 1.0, 0.0)]
-
-    directions = np.empty_like(pts)
-    directions[0] = pts[1] - pts[0]
-    directions[-1] = pts[-1] - pts[-2]
-    if len(pts) > 2:
-        directions[1:-1] = pts[2:] - pts[:-2]
-    lengths = np.linalg.norm(directions, axis=1, keepdims=True)
-    lengths[lengths == 0] = 1
-    directions /= lengths
-
-    return [
-        (float(pts[i][0]), float(pts[i][1]),
-         float(directions[i][0]), float(directions[i][1]))
-        for i in range(len(pts))
-    ]
 
 
 def generate_rail(track_center, rail_width, base, center_path=None):
@@ -140,8 +74,8 @@ def generate_rail(track_center, rail_width, base, center_path=None):
     outer_rail_xy = [pt for _, pt in outer_points]
 
     path_xy = [(p[0], p[1]) for p in center_path] if center_path is not None else None
-    inner_rail = _add_directions_to_points(inner_rail_xy, center_path=path_xy)
-    outer_rail = _add_directions_to_points(outer_rail_xy, center_path=path_xy)
+    inner_rail = add_directions_to_points(inner_rail_xy, center_path=path_xy)
+    outer_rail = add_directions_to_points(outer_rail_xy, center_path=path_xy)
     return inner_rail, outer_rail
 
 
@@ -244,8 +178,8 @@ def generate_track_center_double(path, track_width, base):
 
     path_xy = [(float(p[0]), float(p[1])) for p in path]
     return (
-        _add_directions_to_points(left_ordered, center_path=path_xy),
-        _add_directions_to_points(right_ordered, center_path=path_xy),
+        add_directions_to_points(left_ordered, center_path=path_xy),
+        add_directions_to_points(right_ordered, center_path=path_xy),
     )
 
 

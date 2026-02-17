@@ -1,4 +1,4 @@
-from util.shapeUtil import step_line
+from util.CoreUtil.shapeUtil import step_line
 
 
 def _elevation_at(x, z, elevation_lut, default=0):

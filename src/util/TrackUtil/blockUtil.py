@@ -17,12 +17,6 @@ def _opposite_facing(facing):
 def _get_connection_cardinal(curr_x, curr_z, neighbor_x, neighbor_z):
     return _vector_to_facing(neighbor_x - curr_x, neighbor_z - curr_z)
 
-
-# ---------------------------------------------------------------------------
-# Block-state resolution helpers
-# ---------------------------------------------------------------------------
-
-
 def _rail_shape_from_connections(connections):
     """Return the Minecraft rail ``shape`` value for a set of cardinal connections."""
     corner_map = {
@@ -108,12 +102,6 @@ def _resolve_iron_bar_states(wire_pixels):
         )
     return result
 
-
-# ---------------------------------------------------------------------------
-# Wall / pole block helpers
-# ---------------------------------------------------------------------------
-
-
 def _wall_block(north="none", east="none", south="none", west="none", up="true"):
     return (
         f"minecraft:andesite_wall"
@@ -152,11 +140,6 @@ def _append_lever(x, y, z, toward_center_facing, blocks_dict):
         f"minecraft:lever[face=wall,facing={toward_center_facing}," f"powered=false]"
     )
     blocks_dict.setdefault(block, []).append((x, y, z))
-
-
-# ---------------------------------------------------------------------------
-# Pole detail emission
-# ---------------------------------------------------------------------------
 
 
 def _emit_pole_detail_blocks(
@@ -340,3 +323,121 @@ def _emit_pole_detail_blocks(
             f"half=top,open=false,powered=false,waterlogged=false]"
         )
         blocks_dict.setdefault(td_top_r, []).append((prx, y_r + 11, prz))
+
+
+
+_CARDINALS = {
+    "north": (0, -1),
+    "south": (0, 1),
+    "east": (1, 0),
+    "west": (-1, 0),
+}
+
+
+def resolve_foundation_blocks(blocks, meta):
+    if not blocks:
+        return {}
+
+    blocks_dict = {}
+
+    # ── Collect positions by type ─────────────────────────────────────
+    all_base = set(blocks.keys())
+    wall_positions = {pos for pos, lbl in blocks.items() if lbl == "wall"}
+    carpet_melon_positions = {
+        pos for pos, lbl in blocks.items() if lbl == "carpet_melon"
+    }
+
+    # Derived vertical positions
+    iron_bar_positions = set()
+    for wx, wy, wz in wall_positions:
+        iron_bar_positions.add((wx, wy + 1, wz))
+        iron_bar_positions.add((wx, wy + 2, wz))
+
+    carpet_positions = set()
+    for cx, cy, cz in carpet_melon_positions:
+        carpet_positions.add((cx, cy + 1, cz))
+        carpet_positions.add((cx, cy + 2, cz))
+
+    # ── 1. Andesite walls ─────────────────────────────────────────────
+    #   Connect tall to every cardinal neighbour that is also a
+    #   foundation block at the same Y.  up = false always.
+    for pos in wall_positions:
+        x, y, z = pos
+        sides = {}
+        for facing, (dx, dz) in _CARDINALS.items():
+            neighbour = (x + dx, y, z + dz)
+            sides[facing] = "tall" if neighbour in all_base else "none"
+        block_str = (
+            f"minecraft:andesite_wall"
+            f"[east={sides['east']},north={sides['north']},"
+            f"south={sides['south']},up=false,"
+            f"waterlogged=false,west={sides['west']}]"
+        )
+        blocks_dict.setdefault(block_str, []).append(pos)
+
+    # ── 2. Melon blocks (plain + carpet_melon base) ───────────────────
+    for pos, label in blocks.items():
+        if label in ("melon", "carpet_melon"):
+            blocks_dict.setdefault("minecraft:melon", []).append(pos)
+
+    # ── 3. Iron bars above walls (Y+1, Y+2) ──────────────────────────
+    #   Connect to cardinal iron-bar neighbours at the same Y.
+    for pos in iron_bar_positions:
+        x, y, z = pos
+        sides = {}
+        for facing, (dx, dz) in _CARDINALS.items():
+            neighbour = (x + dx, y, z + dz)
+            sides[facing] = "true" if neighbour in iron_bar_positions else "false"
+        block_str = (
+            f"minecraft:iron_bars"
+            f"[east={sides['east']},north={sides['north']},"
+            f"south={sides['south']},"
+            f"waterlogged=false,west={sides['west']}]"
+        )
+        blocks_dict.setdefault(block_str, []).append(pos)
+
+    # ── 4. Stone buttons above iron bars (Y+3) ───────────────────────
+    #   face=floor, facing toward track centre.
+    for pos in wall_positions:
+        wx, wy, wz = pos
+        toward = meta.get(pos, "north")
+        button_pos = (wx, wy + 3, wz)
+        block_str = (
+            f"minecraft:stone_button" f"[face=floor,facing={toward},powered=false]"
+        )
+        blocks_dict.setdefault(block_str, []).append(button_pos)
+
+    # ── 5. Pale moss carpets above carpet_melons (Y+1, Y+2) ──────────
+    #   bottom = false.
+    #   Each cardinal side is "tall" if an iron bar sits in that direction,
+    #   OR if that direction is away from the track centre.
+    #   On corners both outward sides naturally face iron bars, so the
+    #   carpet connects tall in every direction that has one.
+    for pos in carpet_positions:
+        x, y, z = pos
+        sides = {"north": "none", "south": "none", "east": "none", "west": "none"}
+
+        # Tall toward every adjacent iron bar at the same Y
+        for facing, (dx, dz) in _CARDINALS.items():
+            neighbour = (x + dx, y, z + dz)
+            if neighbour in iron_bar_positions:
+                sides[facing] = "tall"
+
+        # Ensure outward side (away from track) is tall even if no
+        # iron bar sits exactly in that cell (e.g. staggered elevations)
+        base_y1 = (x, y - 1, z)
+        base_y2 = (x, y - 2, z)
+        base_pos = base_y1 if base_y1 in carpet_melon_positions else base_y2
+        if base_pos in meta:
+            away = _opposite_facing(meta[base_pos])
+            sides[away] = "tall"
+
+        block_str = (
+            f"minecraft:pale_moss_carpet"
+            f"[bottom=false,east={sides['east']},"
+            f"north={sides['north']},south={sides['south']},"
+            f"west={sides['west']}]"
+        )
+        blocks_dict.setdefault(block_str, []).append(pos)
+
+    return blocks_dict

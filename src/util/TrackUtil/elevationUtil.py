@@ -1,7 +1,7 @@
 import numpy as np
 
-from util.pathUtil import path_boundaries
-from util.maskingUtil import mask_all
+from ..CoreUtil.pathUtil import path_boundaries
+from ..CoreUtil.maskingUtil import mask_all
 
 
 def _points_match(a, b):

@@ -1,15 +1,12 @@
 import numpy as np
 
-from util.dubinsUtil import int_dubins_path
-from util.trackUtil import track, generate_base
-from util.elevationUtil import generate_elevation_lookup, generate_elevation_mask
-from util.catenaryUtil import generate_catenary
-from util.wireUtil import generate_wire, apply_elevation
-from util.blockUtil import (
+from util.CoreUtil.dubinsUtil import int_dubins_path
+from util.TrackUtil.trackUtil import track
+from util.TrackUtil.elevationUtil import generate_elevation_lookup
+from util.TrackUtil.catenaryUtil import generate_catenary
+from util.TrackUtil.wireUtil import generate_wire
+from util.TrackUtil.blockUtil import (
     _norm_coord,
-    _vector_to_facing,
-    _opposite_facing,
-    _get_connection_cardinal,
     _resolve_track_shapes,
     _resolve_anvil_facings,
     _resolve_iron_bar_states,
@@ -28,9 +25,6 @@ DEFAULT_CONFIG = {
     "brim_block": "minecraft:gray_wool",
     "elevation_interval": 1,
 }
-# ---------------------------------------------------------------------------
-# Assembly — the single public entry point called by main.py
-# ---------------------------------------------------------------------------
 
 
 def assemble_path(control_points, radius):
@@ -72,26 +66,20 @@ def assemble_track(control_points, elevation_control_points=None, config=None):
     brim_block = cfg["brim_block"]
     elevation_interval = cfg["elevation_interval"]
 
-    # ------------------------------------------------------------------ #
-    # 1. Build the Dubins path (merged, no overlap)                       #
-    # ------------------------------------------------------------------ #
+    #Create path
     path, start, end = assemble_path(control_points, turn_radius)
 
     if len(path) < 2:
         raise ValueError("Path too short to build a track.")
 
-    # ------------------------------------------------------------------ #
-    # 2. Generate track geometry                                          #
-    # ------------------------------------------------------------------ #
+    #Create track
     (base, brim), (track_center, rail_0, rail_1) = track(
         path, start, end, base_width, track_width
     )
 
     base_set = set(map(tuple, base))
 
-    # ------------------------------------------------------------------ #
-    # 3. Build combined elevation mask                                    #
-    # ------------------------------------------------------------------ #
+    #Create elevation LUT for Path
     elevation_lut = generate_elevation_lookup(
         path,
         base_width,
@@ -100,9 +88,7 @@ def assemble_track(control_points, elevation_control_points=None, config=None):
         elevation_control_points=elevation_control_points,
     )
 
-    # ------------------------------------------------------------------ #
-    # 4. Generate catenary poles / cantilevers along the entire path      #
-    # ------------------------------------------------------------------ #
+    #Create catenary
     # track_center holds (x, z, dx, dz) tuples; catenary needs plain
     # (x, z) lists wrapped in an outer list for set-based intersection.
     tc_left_xz = [(_norm_coord(pt[0]), _norm_coord(pt[1])) for pt in track_center[0]]
