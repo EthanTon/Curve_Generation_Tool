@@ -58,7 +58,7 @@ def add_directions_to_points(points, center_path=None):
     pts = np.asarray(points, dtype=float)
 
     if center_path is not None and len(center_path) >= 2:
-        cp, tangents = _center_path_tangents(center_path)
+        cp, tangents = center_path_tangents(center_path)
 
         chunk = max(1, int(25_000_000 / max(len(cp), 1)))
         nearest_idx = np.empty(len(pts), dtype=int)
@@ -104,7 +104,7 @@ def add_directions_to_points(points, center_path=None):
     ]
 
 
-def _center_path_tangents(center_path, window=3):
+def center_path_tangents(center_path, window=3):
     """Precompute unit tangent vectors for every point on a center path."""
     cp = np.asarray(center_path, dtype=float)
     n = len(cp)
@@ -116,6 +116,23 @@ def _center_path_tangents(center_path, window=3):
         length = np.linalg.norm(t)
         tangents[i] = t / length if length > 0 else np.array([1.0, 0.0])
     return cp, tangents
+
+
+def optimal_tangent_window(radius, min_window=1, max_window=None):
+    import math
+
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    w_opt = math.sqrt(2.0 * radius)
+
+    if max_window is None:
+
+        max_window = max(int(2 * math.ceil(w_opt)), 10)
+
+    window = int(round(w_opt))
+    window = max(min_window, min(window, max_window))
+    return window
 
 
 def ortho(vect2d):
