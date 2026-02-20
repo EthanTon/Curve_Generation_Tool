@@ -85,40 +85,74 @@ def generate_elevation_mask(
     z_end=None,
 ):
     direction = -1 if (z_end is not None and z_end < z_start) else 1
+    elevation_change = abs(z_end - z_start) if z_end is not None else 0
 
-    # Number of distinct elevation levels (inclusive of both endpoints)
-    required_steps = abs(z_end - z_start) + 1 if z_end is not None else None
+    np_path = [np.asarray(pt, dtype=float) for pt in path]
 
-    boundaries = []
-    if required_steps is not None:
-        # Determine the largest step size that still produces enough mask layers
-        # to cover the required elevation change, while staying >= min_step
-        path_length = end_idx - start_idx
-        # Floor division gives the largest step that yields enough segments
-        elevation_step = path_length // (required_steps + 2)
-        # Use the largest step possible, but no smaller than min_step
-        effective_step = max(min_step, elevation_step)
-        boundaries = path_boundaries(path, effective_step, start_idx, end_idx)
-    else:
-        boundaries = path_boundaries(path, step_size, start_idx, end_idx)
+    # Slice path to only the segment of interest so mask_all doesn't
+    # assign base points from other segments via Voronoi spill-over.
+    sub_path = np_path[start_idx : end_idx + 1]
 
-    masks = mask_all(path, boundaries, base_width, base)
+    # Filter base to a bounding box around the sub-path to prevent
+    # distant points from being claimed by edge segments.
+    sub_arr = np.asarray(sub_path)
+    margin = base_width + 1
+    bbox_min = sub_arr.min(axis=0) - margin
+    bbox_max = sub_arr.max(axis=0) + margin
+    filtered_base = {
+        pt
+        for pt in base
+        if bbox_min[0] <= pt[0] <= bbox_max[0] and bbox_min[1] <= pt[1] <= bbox_max[1]
+    }
 
-    num_steps = len(masks)
+    # Generate boundaries relative to the sub-path (0-indexed).
+    effective_step = max(min_step, step_size)
+    boundaries = path_boundaries(sub_path, effective_step, 0, len(sub_path) - 1)
+    masks = mask_all(sub_path, boundaries, base_width, filtered_base)
+    num_masks = len(masks)
 
-    if required_steps is not None and num_steps < required_steps:
+    if num_masks == 0:
+        return {}
+
+    if elevation_change > 0 and num_masks < elevation_change:
+        segment_length = len(sub_path)
+        max_step_for_change = segment_length // elevation_change
         raise ValueError(
-            f"Invalid control point: the elevation change from z={z_start} to z={z_end} "
-            f"requires {required_steps} mask layers, but only {num_steps} were generated "
-            f"for the given path segment (indices {start_idx} to {end_idx}). "
-            f"Adjust the control point positions or elevation values."
+            f"Cannot reach elevation change from y={z_start} to y={z_end} "
+            f"(Δ{elevation_change}) with step_size={effective_step}. "
+            f"The path segment (indices {start_idx}–{end_idx}, length {segment_length}) "
+            f"produced {num_masks} mask layers but at least {elevation_change} are required. "
+            f"Reduce step_size to {max_step_for_change} or less, shorten the elevation "
+            f"change, or lengthen the path segment."
         )
 
     lut: dict[tuple, float] = {}
-    for i, point_set in enumerate(masks):
-        y_val = z_start + i * direction
-        if z_end is not None:
-            y_val = min(y_val, z_end) if direction >= 0 else max(y_val, z_end)
-        for pt in point_set:
-            lut[pt] = y_val
+
+    # Seed the segment endpoints so path points at the control-point
+    # locations are always present, even if path_boundaries skips them.
+    start_key = tuple(int(c) for c in path[start_idx][:2])
+    lut[start_key] = z_start
+    if z_end is not None:
+        end_key = tuple(int(c) for c in path[end_idx][:2])
+        lut[end_key] = z_end
+
+    if elevation_change == 0 or z_end is None:
+        # Flat segment – every mask layer shares the same y level.
+        for point_set in masks:
+            for pt in point_set:
+                lut[pt] = z_start
+    else:
+        # Distribute the elevation change evenly across all mask layers,
+        # using the *largest* interval possible between successive y-level
+        # changes.  We linearly map the mask index to the elevation range
+        # so that the first mask is at z_start and the last at z_end.
+        for i, point_set in enumerate(masks):
+            if num_masks > 1:
+                level = round(elevation_change * i / (num_masks - 1))
+            else:
+                level = elevation_change
+            y_val = z_start + level * direction
+            for pt in point_set:
+                lut[pt] = y_val
+
     return lut

@@ -1,4 +1,4 @@
-from ..SchematicUtil.schematicutil import create_schematic
+from ..SchematicUtil.schematicUtil import create_schematic, read_schematic
 from ..WorldUtil.worldUtil import (
     _read_region,
     _get_nbt,
@@ -9,6 +9,23 @@ from ..WorldUtil.worldUtil import (
 
 import os
 from collections import defaultdict
+
+
+def import_schematic(filename, origin=(0, 0, 0)):
+    blocks, dims, offset = read_schematic(filename)
+    ox, oy, oz = offset
+
+    blocks_dict = defaultdict(list)
+    for lx, ly, lz, block_str in blocks:
+        blocks_dict[block_str].append(
+            (
+                lx + ox + origin[0],
+                ly + oy + origin[1],
+                lz + oz + origin[2],
+            )
+        )
+
+    return dict(blocks_dict)
 
 
 def export_schematic(

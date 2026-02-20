@@ -1,6 +1,7 @@
 import numpy as np
 import amulet_nbt as nbt
 from . import varintWriter as varintWriter
+from . import varintIterator as varintIterator
 
 
 def load_schematic(filename):
@@ -14,6 +15,32 @@ def load_schematic(filename):
         raise ValueError("The provided file does not contain a 'Schematic' root tag.")
 
     return root
+
+
+def read_schematic(filename):
+    file = load_schematic(filename)
+    if file is None:
+        raise ValueError(f"Failed to load schematic: {filename}")
+
+    source_blocks = get_block_data(file)
+    width, height, length = (int(v) for v in get_dimension(file))
+    ox, oy, oz = (int(v) for v in get_offset(file))
+
+    palette = swap_palette(dict(source_blocks["Palette"]))
+    raw_data = source_blocks["Data"]
+    block_data = bytes(b & 0xFF for b in raw_data)
+    block_iter = varintIterator.VarIntIterator(block_data)
+
+    blocks = []
+    source_index = 0
+    while block_iter.has_next():
+        block_id = next(block_iter)
+        lx, ly, lz = get_local_coordinate(source_index, width, length)
+        block_str = str(palette[block_id])
+        blocks.append((lx, ly, lz, block_str))
+        source_index += 1
+
+    return blocks, (width, height, length), (ox, oy, oz)
 
 
 def get_block_data(file):
@@ -139,7 +166,7 @@ def swap_palette(source_palette):
     palette = {}
     for value, block in source_palette.items():
         try:
-            palette[block] = int(value)
+            palette[int(block)] = int(value)
         except (ValueError, TypeError):
-            palette[block] = value
+            palette[int(block)] = value
     return palette

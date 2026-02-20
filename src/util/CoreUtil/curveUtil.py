@@ -5,7 +5,6 @@ from util.CoreUtil.shapeUtil import (
     bresenham_filled_circle,
     bresenham_filled_arc,
     bresenham_line,
-    bresenham_circle,
 )
 
 
