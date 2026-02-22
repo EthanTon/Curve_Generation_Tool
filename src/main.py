@@ -15,8 +15,17 @@ Usage examples:
   # Path-only with custom block
   python main.py -o output.schem --radius 20 --block minecraft:oak_planks points.json
 
-Block positions are normalised to the minimum corner during export,
-so pasting at your player position places the structure at your feet.
+Cross-section workflow
+----------------------
+The schematic's copy/paste origin (the player position when //copy was run)
+acts as the *paste point* for each step along the curve.  Block offsets in the
+cross-section are relative to that origin, exactly as WorldEdit would place
+them with //paste.
+
+During assembly every path point becomes the paste point.  Only at export
+time are all coordinates shifted so that the **first control point** sits at
+the schematic origin – meaning a WorldEdit //paste at your feet puts the
+start of the curve right where you stand.
 
 Expected JSON structure (just two flat lists):
 {
@@ -37,12 +46,16 @@ import sys
 import numpy as np
 
 from curveAssembly import assemble_curve, assemble_curve_path
+from collections import defaultdict
+
 from util.CoreUtil.ioUtil import import_schematic, export_schematic, export_world
+from util.SchematicUtil.schematicUtil import read_schematic
 from util.CoreUtil.crossSectionUtil import (
     parse_cross_section,
     cross_section_at_x,
     cross_section_at_y,
     cross_section_at_z,
+    to_curve_offsets,
 )
 
 
@@ -63,13 +76,48 @@ def _load_points(path):
     return control, elevation
 
 
+def _apply_offset(blocks_dict, offset):
+    """Shift every position in *blocks_dict* by *offset*.
+
+    This converts local schematic coordinates into paste-origin-relative
+    offsets – i.e. the displacement each block would have from the player
+    position during a WorldEdit //paste.
+    """
+    ox, oy, oz = offset
+    result = {}
+    for block_str, positions in blocks_dict.items():
+        result[block_str] = [(x + ox, y + oy, z + oz) for x, y, z in positions]
+    return result
+
+
 def _load_cross_section(schematic_path, axis=None, level=None):
-    """Import a schematic and optionally slice it along an axis."""
-    blocks = import_schematic(schematic_path)
+    """Import a schematic and return a cross-section with paste-origin-relative
+    offsets.
+
+    Every position in the returned dict is expressed as an offset from the
+    schematic's copy/paste origin, so stamping at a path point reproduces
+    the same spatial relationship WorldEdit //paste would give.
+
+    When *axis*/*level* are provided the schematic is sliced first (the
+    level is specified in **world** coordinates, i.e. accounting for the
+    schematic offset) and the resulting 2-D slice is converted into 3-D
+    curve offsets via ``to_curve_offsets`` with the paste origin as the
+    reference point.
+    """
+    raw_blocks, dims, offset = read_schematic(schematic_path)
+
+    # Build a blocks_dict in local schematic coordinates.
+    blocks_dict = defaultdict(list)
+    for lx, ly, lz, block_str in raw_blocks:
+        blocks_dict[block_str].append((lx, ly, lz))
+    blocks_dict = dict(blocks_dict)
 
     if axis is None:
-        return parse_cross_section(blocks)
+        # Full 3-D cross-section – convert local coords → paste-origin offsets.
+        cross_section = parse_cross_section(blocks_dict)
+        return _apply_offset(cross_section, offset)
 
+    # ── Sliced cross-section ────────────────────────────────────────────
     slice_funcs = {
         "x": cross_section_at_x,
         "y": cross_section_at_y,
@@ -80,7 +128,11 @@ def _load_cross_section(schematic_path, axis=None, level=None):
     if level is None:
         raise ValueError("--slice-level is required when --slice-axis is set.")
 
-    return slice_funcs[axis](blocks, level)
+    # Slice functions accept local coords + offset and return 2-D positions
+    # in world coordinates.  The paste origin in world coords is (0, 0, 0)
+    # when expressed relative to itself, so copy_point = (0, 0).
+    slice_2d = slice_funcs[axis](blocks_dict, level, offset=offset)
+    return to_curve_offsets(slice_2d, copy_point=(0, 0), axis=axis)
 
 
 def _is_world_dir(path):
@@ -92,17 +144,34 @@ def _is_world_dir(path):
     return ext == ""
 
 
+def _compute_export_offset(blocks_dict, path_origin):
+    """Compute a schematic offset so that the first control point aligns with
+    the player's paste position in WorldEdit.
+
+    ``create_schematic`` normalises blocks to their minimum corner.  The
+    offset stored in the .schem file compensates for that normalisation so
+    that //paste places the *path_origin* at the player's feet.
+    """
+    all_pos = [pos for positions in blocks_dict.values() for pos in positions]
+    min_x = min(p[0] for p in all_pos)
+    min_y = min(p[1] for p in all_pos)
+    min_z = min(p[2] for p in all_pos)
+    ox, oy, oz = path_origin
+    return (min_x - ox, min_y - oy, min_z - oz)
+
+
 def _export(
-    blocks_dict, output_path, origin=(0, 0, 0), dimension="overworld", data_version=3700
+    blocks_dict, output_path, path_origin=(0, 0, 0), dimension="overworld", data_version=3700
 ):
     if _is_world_dir(output_path):
         count = export_world(blocks_dict, output_path, dimension=dimension)
         print(f"Placed {count} blocks in world: {output_path} ({dimension})")
     else:
+        offset = _compute_export_offset(blocks_dict, path_origin)
         export_schematic(
-            blocks_dict, filename=output_path, offset=origin, data_version=data_version
+            blocks_dict, filename=output_path, offset=offset, data_version=data_version
         )
-        print(f"Saved schematic: {output_path} (origin: {origin})")
+        print(f"Saved schematic: {output_path} (path origin: {path_origin}, offset: {offset})")
 
 
 def _patch_block_type(blocks_dict, block_type):
@@ -154,6 +223,12 @@ def build_parser():
         help="Cross-section width (required with -i).",
     )
     p.add_argument(
+        "--dept",
+        type=int,
+        required=True,
+        help="Depth value used in backtrack distance calculation (width - dept + 2).",
+    )
+    p.add_argument(
         "--step-size",
         type=int,
         default=1,
@@ -163,6 +238,23 @@ def build_parser():
         "--symmetrical",
         action="store_true",
         help="Mirror the cross-section across the path center.",
+    )
+    p.add_argument(
+        "--resolve-rails",
+        action="store_true",
+        help="Resolve rail shape properties based on neighbor connectivity.",
+    )
+    p.add_argument(
+        "--side",
+        choices=["left", "right"],
+        default="left",
+        help="Which side of the path the cross-section represents (default: left).",
+    )
+    p.add_argument(
+        "--separate-halves",
+        action="store_true",
+        help="Export each mirror half as a separate schematic (symmetrical mode only). "
+        "Produces <output>_half0.schem, <output>_half1.schem alongside the merged file.",
     )
 
     # path-only options
@@ -228,6 +320,7 @@ def main():
         if args.width is None:
             parser.error("--width is required when using a cross-section (-i).")
 
+        # Cross-section offsets are now paste-origin-relative.
         cross_section = _load_cross_section(
             args.input,
             axis=args.slice_axis,
@@ -239,26 +332,36 @@ def main():
                 file=sys.stderr,
             )
 
-        blocks_dict = assemble_curve(
+        curve_result = assemble_curve(
             control_points=control_points,
             radius=args.radius,
             cross_section=cross_section,
             cross_section_width=args.width,
+            dept=args.dept,
             elevation_control_points=elevation_points,
             step_size=args.step_size,
             symmetrical=args.symmetrical,
+            resolve_rails=args.resolve_rails,
+            side=args.side,
         )
+
+        if args.separate_halves:
+            blocks_dict, path_origin, halves_list = curve_result
+        else:
+            blocks_dict, path_origin = curve_result
+            halves_list = None
     else:
         # ── Path-only mode ──────────────────────────────────────────────
         if len(control_points) < 2:
             parser.error("At least 2 control points are required in the JSON file.")
 
-        blocks_dict = assemble_curve_path(
+        blocks_dict, path_origin = assemble_curve_path(
             control_points=control_points,
             radius=args.radius,
             elevation_control_points=elevation_points,
             step_size=args.step_size,
         )
+        halves_list = None
 
         if args.block != "minecraft:stone":
             blocks_dict = _patch_block_type(blocks_dict, args.block)
@@ -273,10 +376,27 @@ def main():
     _export(
         blocks_dict,
         args.output,
-        origin=(0, 0, 0),
+        path_origin=path_origin,
         dimension=args.dimension,
         data_version=args.data_version,
     )
+
+    # Export individual halves when requested
+    if halves_list:
+        base, ext = os.path.splitext(args.output)
+        for i, half_dict in enumerate(halves_list):
+            if not half_dict:
+                continue
+            half_path = f"{base}_half{i}{ext}"
+            _export(
+                half_dict,
+                half_path,
+                path_origin=path_origin,
+                dimension=args.dimension,
+                data_version=args.data_version,
+            )
+            half_total = sum(len(v) for v in half_dict.values())
+            print(f"  Half {i}: {half_total} blocks -> {half_path}")
 
 
 if __name__ == "__main__":

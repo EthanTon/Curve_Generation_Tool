@@ -2,6 +2,7 @@ import numpy as np
 
 from .pathUtil import path_tangent
 
+
 def mask_all(path, boundaries, base_width, base):
     pts = np.asarray(path, dtype=float)
     P = len(pts)
@@ -51,7 +52,7 @@ def _voronoi_assign(base_arr, pts, B, P, boundaries):
     for lo in range(0, B, chunk):
         hi = min(lo + chunk, B)
         diffs = base_arr[lo:hi, np.newaxis, :] - pts[np.newaxis, :, :]
-        dists_sq = np.sum(diffs ** 2, axis=2)
+        dists_sq = np.sum(diffs**2, axis=2)
         nearest_idx[lo:hi] = np.argmin(dists_sq, axis=1)
 
     seg_edges = np.array(boundaries, dtype=int)
@@ -64,15 +65,14 @@ def _refine_boundaries(assignment, base_arr, pts, boundaries, base_width):
     radius_sq = radius * radius
 
     for j, b_idx in enumerate(boundaries):
-        tangent = path_tangent(pts, b_idx)
+        angle = path_tangent(pts, b_idx)
+        tx, ty = np.cos(angle), np.sin(angle)
         origin = pts[b_idx]
 
         seg_before = j
         seg_after = j + 1
 
-        candidates = np.where(
-            (assignment == seg_before) | (assignment == seg_after)
-        )[0]
+        candidates = np.where((assignment == seg_before) | (assignment == seg_after))[0]
         if len(candidates) == 0:
             continue
 
@@ -83,7 +83,7 @@ def _refine_boundaries(assignment, base_arr, pts, boundaries, base_width):
             continue
 
         local_diff = base_arr[local] - origin
-        proj = local_diff[:, 0] * tangent[0] + local_diff[:, 1] * tangent[1]
+        proj = local_diff[:, 0] * tx + local_diff[:, 1] * ty
 
         assignment[local[proj >= 0]] = seg_after
         assignment[local[proj < 0]] = seg_before

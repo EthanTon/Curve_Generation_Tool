@@ -18,17 +18,14 @@ def path_boundaries(path, step_size, start_idx, end_idx):
 
 
 def path_tangent(pts, index, window=3):
+    """Return tangent angle (radians) at index via finite difference over a window."""
     lo = max(index - window, 0)
     hi = min(index + window, len(pts) - 1)
-    tangent = pts[hi] - pts[lo]
-
-    length = np.linalg.norm(tangent)
-    if length > 0:
-        tangent = tangent / length
-    else:
-        tangent = np.array([1.0, 0.0])
-
-    return tangent
+    dx = pts[hi][0] - pts[lo][0]
+    dy = pts[hi][1] - pts[lo][1]
+    if dx == 0 and dy == 0:
+        return 0.0
+    return float(np.arctan2(dy, dx))
 
 
 def weighted_pca_orthogonal(path, index, sigma=2):
@@ -58,7 +55,8 @@ def add_directions_to_points(points, center_path=None):
     pts = np.asarray(points, dtype=float)
 
     if center_path is not None and len(center_path) >= 2:
-        cp, tangents = center_path_tangents(center_path)
+        angles = center_path_tangents(center_path)
+        cp = np.asarray(center_path, dtype=float)
 
         chunk = max(1, int(25_000_000 / max(len(cp), 1)))
         nearest_idx = np.empty(len(pts), dtype=int)
@@ -70,13 +68,13 @@ def add_directions_to_points(points, center_path=None):
 
         result = []
         for i in range(len(pts)):
-            t = tangents[nearest_idx[i]]
+            a = angles[nearest_idx[i]]
             result.append(
                 (
                     float(pts[i][0]),
                     float(pts[i][1]),
-                    float(t[0]),
-                    float(t[1]),
+                    float(np.cos(a)),
+                    float(np.sin(a)),
                 )
             )
         return result
@@ -105,17 +103,16 @@ def add_directions_to_points(points, center_path=None):
 
 
 def center_path_tangents(center_path, window=3):
-    """Precompute unit tangent vectors for every point on a center path."""
-    cp = np.asarray(center_path, dtype=float)
-    n = len(cp)
-    tangents = np.empty_like(cp)
+    """Return list of tangent angles (radians) for every point on the path."""
+    n = len(center_path)
+    angles = [0.0] * n
     for i in range(n):
         lo = max(i - window, 0)
         hi = min(i + window, n - 1)
-        t = cp[hi] - cp[lo]
-        length = np.linalg.norm(t)
-        tangents[i] = t / length if length > 0 else np.array([1.0, 0.0])
-    return cp, tangents
+        dx = center_path[hi][0] - center_path[lo][0]
+        dy = center_path[hi][1] - center_path[lo][1]
+        angles[i] = float(np.arctan2(dy, dx)) if (dx != 0 or dy != 0) else 0.0
+    return angles
 
 
 def optimal_tangent_window(radius, min_window=1, max_window=None):
