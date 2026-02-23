@@ -30,21 +30,21 @@ def _flip_cross_section(cross_section):
     return flipped
 
 
-def _extend_path(path, start_angle, end_angle, width):
+def _extend_path(path, start_angle, end_angle, dept):
     """Extend path at both ends for cross-section coverage. Returns (full_path, raw_start, raw_end)."""
-    ext = 2 * width
+    ext = 2 * dept
     sx, sz = path[0]
-    a0 = math.radians(start_angle) + math.pi
+    a0 = start_angle + math.pi
     start_line = bresenham_line(
-        _norm(sx + ext * math.cos(a0)), _norm(sz + ext * math.sin(a0)), sx, sz
+        _norm(sx + ext * math.cos(start_angle)), _norm(sz + ext * math.sin(start_angle)), sx, sz
     )
     ex, ez = path[-1]
-    a1 = math.radians(end_angle)
     end_line = bresenham_line(
-        ex, ez, _norm(ex + ext * math.cos(a1)), _norm(ez + ext * math.sin(a1))
+        ex, ez, _norm(ex + ext * math.cos(end_angle)), _norm(ez + ext * math.sin(end_angle))
     )
     pre = start_line[:-1]
     post = end_line[1:]
+    
     return pre + path + post, len(pre), len(pre) + len(path)
 
 
@@ -225,7 +225,7 @@ def assemble_curve(
     raw_path, _, _ = draw_path(control_points, radius)
     raw_path = [(_norm(pt[0]), _norm(pt[1])) for pt in raw_path]
     path, raw_start, raw_end = _extend_path(
-        raw_path, start_angle, end_angle, cross_section_width
+        raw_path, start_angle, end_angle, dept
     )
 
     silhouette = draw_path_silhouette(
