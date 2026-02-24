@@ -1,33 +1,15 @@
 import math
 
-from util.CoreUtil.blockUtil import (
-    rotate_block_state,
-    is_rail_block,
-    mirror_block_state,
-)
+from util.CoreUtil.blockUtil import is_rail_block
 from util.CoreUtil.curveUtil import draw_path, draw_path_silhouette
 from util.CoreUtil.elevationUtil import generate_elevation_lookup
 from util.CoreUtil.pathUtil import optimal_tangent_window, center_path_tangents
 from util.CoreUtil.shapeUtil import bresenham_line
+from util.CoreUtil.crossSectionUtil import flip_cross_section, precompute_sections
 
 
 def _norm(v):
     return int(round(float(v)))
-
-
-def _flip_cross_section(cross_section):
-    """Mirror cross-section across the path centre (the paste origin).
-
-    Because cross-section offsets are already expressed relative to the paste
-    origin (0, 0, 0), flipping simply negates the X and Z components while
-    also mirroring any directional block states.
-    """
-    flipped = {}
-    for block, offsets in cross_section.items():
-        m_block = mirror_block_state(block,"xz")
-        new_offsets = [(-ox, oy, -oz) for ox, oy, oz in offsets]
-        flipped.setdefault(m_block, []).extend(new_offsets)
-    return flipped
 
 
 def _extend_path(path, start_angle, end_angle, dept):
@@ -36,39 +18,22 @@ def _extend_path(path, start_angle, end_angle, dept):
     sx, sz = path[0]
     a0 = start_angle + math.pi
     start_line = bresenham_line(
-        _norm(sx + ext * math.cos(start_angle)), _norm(sz + ext * math.sin(start_angle)), sx, sz
+        _norm(sx + ext * math.cos(start_angle)),
+        _norm(sz + ext * math.sin(start_angle)),
+        sx,
+        sz,
     )
     ex, ez = path[-1]
     end_line = bresenham_line(
-        ex, ez, _norm(ex + ext * math.cos(end_angle)), _norm(ez + ext * math.sin(end_angle))
+        ex,
+        ez,
+        _norm(ex + ext * math.cos(end_angle)),
+        _norm(ez + ext * math.sin(end_angle)),
     )
     pre = start_line[:-1]
     post = end_line[1:]
-    
+
     return pre + path + post, len(pre), len(pre) + len(path)
-
-
-def _precompute_sections(cross_section):
-    """Precompute rotated cross-sections for 4 angles × 2 flip states."""
-    sections = {}
-    for angle_deg in (0, 90, 180, 270):
-        angle_rad = math.radians(angle_deg)
-        steps = angle_deg // 90
-        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
-        for flipped in (False, True):
-            rotated = {}
-            for block, offsets in cross_section.items():
-                if flipped:
-                    r_block = rotate_block_state(mirror_block_state(block), steps)
-                else:
-                    r_block = rotate_block_state(block, steps)
-                for ox, oy, oz in offsets:
-                    fox = -ox if flipped else ox
-                    rx = _norm(cos_a * fox - sin_a * oz)
-                    rz = _norm(sin_a * fox + cos_a * oz)
-                    rotated.setdefault(r_block, []).append((rx, oy, rz))
-            sections[(angle_deg, flipped)] = rotated
-    return sections
 
 
 def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=None):
@@ -172,18 +137,12 @@ def _walk_path(
         idx += 1
 
 
-def rotate_cross_section_point(block_string, offset, tangent_angle):
-    raw = math.degrees(float(tangent_angle)) % 360
-    angle_deg = int(round(raw / 90.0) * 90) % 360
-    angle_rad = math.radians(angle_deg)
-    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
-    ox, oy, oz = offset
-    pos = (_norm(cos_a * ox - sin_a * oz), oy, _norm(sin_a * ox + cos_a * oz))
-    return rotate_block_state(block_string, angle_deg // 90), pos
-
-
 def assemble_curve_path(
-    control_points, radius, elevation_control_points=[], step_size=1
+    control_points,
+    radius,
+    elevation_control_points=[],
+    step_size=1,
+    block="minecraft:beacon",
 ):
     """Build a single-block-wide path and return *(blocks_dict, path_origin)*.
 
@@ -197,7 +156,7 @@ def assemble_curve_path(
     )
     blocks = {}
     for x, z in norm_path:
-        blocks.setdefault("minecraft:stone", []).append((x, elev_lut.get((x, z), 0), z))
+        blocks.setdefault(block, []).append((x, elev_lut.get((x, z), 0), z))
 
     # Path origin = first control point position (used as export origin)
     cp0_xz = norm_path[0]
@@ -217,16 +176,13 @@ def assemble_curve(
     step_size=1,
     symmetrical=False,
     resolve_rails=False,
-    side="left",
 ):
     start_angle = control_points[0][-1]
     end_angle = control_points[-1][-1]
 
     raw_path, _, _ = draw_path(control_points, radius)
     raw_path = [(_norm(pt[0]), _norm(pt[1])) for pt in raw_path]
-    path, raw_start, raw_end = _extend_path(
-        raw_path, start_angle, end_angle, dept
-    )
+    path, raw_start, raw_end = _extend_path(raw_path, start_angle, end_angle, dept)
 
     silhouette = draw_path_silhouette(
         raw_path, control_points[0], control_points[-1], cross_section_width
@@ -240,20 +196,20 @@ def assemble_curve(
 
     if symmetrical:
         # Mirror around the paste origin (0, 0, 0) – no external origin needed.
-        cs_mirror = _flip_cross_section(cross_section)
+        cs_mirror = flip_cross_section(cross_section)
         shared_coord_map = {}
 
         rc_a = set() if resolve_rails else None
         rc_b = set() if resolve_rails else None
         halves = [
-            (_precompute_sections(cross_section), shared_coord_map, rc_a),
-            (_precompute_sections(cs_mirror), shared_coord_map, rc_b),
+            (precompute_sections(cross_section), shared_coord_map, rc_a),
+            (precompute_sections(cs_mirror), shared_coord_map, rc_b),
         ]
     else:
         # Single half with its own coord_map
         coord_map = {}
         rc = set() if resolve_rails else None
-        halves = [(_precompute_sections(cross_section), coord_map, rc)]
+        halves = [(precompute_sections(cross_section), coord_map, rc)]
 
     _walk_path(
         path,

@@ -161,7 +161,11 @@ def _compute_export_offset(blocks_dict, path_origin):
 
 
 def _export(
-    blocks_dict, output_path, path_origin=(0, 0, 0), dimension="overworld", data_version=3700
+    blocks_dict,
+    output_path,
+    path_origin=(0, 0, 0),
+    dimension="overworld",
+    data_version=3700,
 ):
     if _is_world_dir(output_path):
         count = export_world(blocks_dict, output_path, dimension=dimension)
@@ -171,7 +175,9 @@ def _export(
         export_schematic(
             blocks_dict, filename=output_path, offset=offset, data_version=data_version
         )
-        print(f"Saved schematic: {output_path} (path origin: {path_origin}, offset: {offset})")
+        print(
+            f"Saved schematic: {output_path} (path origin: {path_origin}, offset: {offset})"
+        )
 
 
 def _patch_block_type(blocks_dict, block_type):
@@ -243,12 +249,6 @@ def build_parser():
         "--resolve-rails",
         action="store_true",
         help="Resolve rail shape properties based on neighbor connectivity.",
-    )
-    p.add_argument(
-        "--side",
-        choices=["left", "right"],
-        default="left",
-        help="Which side of the path the cross-section represents (default: left).",
     )
     p.add_argument(
         "--separate-halves",
@@ -342,7 +342,6 @@ def main():
             step_size=args.step_size,
             symmetrical=args.symmetrical,
             resolve_rails=args.resolve_rails,
-            side=args.side,
         )
 
         if args.separate_halves:

@@ -1,3 +1,11 @@
+import math
+from util.CoreUtil.blockUtil import rotate_block_state, mirror_block_state
+
+
+def _norm(v):
+    return int(round(float(v)))
+
+
 AIR_BLOCKS = frozenset(
     {
         "minecraft:air",
@@ -113,3 +121,51 @@ def to_curve_offsets(cross_section_2d, copy_point, axis="z"):
             offsets[block_str] = converted
 
     return offsets
+
+
+def precompute_sections(cross_section):
+    """Precompute rotated cross-sections for 4 angles × 2 flip states."""
+    sections = {}
+    for angle_deg in (0, 90, 180, 270):
+        angle_rad = math.radians(angle_deg)
+        steps = angle_deg // 90
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        for flipped in (False, True):
+            rotated = {}
+            for block, offsets in cross_section.items():
+                if flipped:
+                    r_block = rotate_block_state(mirror_block_state(block), steps)
+                else:
+                    r_block = rotate_block_state(block, steps)
+                for ox, oy, oz in offsets:
+                    fox = -ox if flipped else ox
+                    rx = _norm(cos_a * fox - sin_a * oz)
+                    rz = _norm(sin_a * fox + cos_a * oz)
+                    rotated.setdefault(r_block, []).append((rx, oy, rz))
+            sections[(angle_deg, flipped)] = rotated
+    return sections
+
+
+def flip_cross_section(cross_section):
+    """Mirror cross-section across the path centre (the paste origin).
+
+    Because cross-section offsets are already expressed relative to the paste
+    origin (0, 0, 0), flipping simply negates the X and Z components while
+    also mirroring any directional block states.
+    """
+    flipped = {}
+    for block, offsets in cross_section.items():
+        m_block = mirror_block_state(block, "xz")
+        new_offsets = [(-ox, oy, -oz) for ox, oy, oz in offsets]
+        flipped.setdefault(m_block, []).extend(new_offsets)
+    return flipped
+
+
+def rotate_cross_section_point(block_string, offset, tangent_angle):
+    raw = math.degrees(float(tangent_angle)) % 360
+    angle_deg = int(round(raw / 90.0) * 90) % 360
+    angle_rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    ox, oy, oz = offset
+    pos = (_norm(cos_a * ox - sin_a * oz), oy, _norm(sin_a * ox + cos_a * oz))
+    return rotate_block_state(block_string, angle_deg // 90), pos
