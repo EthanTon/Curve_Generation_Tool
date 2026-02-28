@@ -16,10 +16,9 @@ def _extend_path(path, start_angle, end_angle, dept):
     """Extend path at both ends for cross-section coverage. Returns (full_path, raw_start, raw_end)."""
     ext = 2 * dept
     sx, sz = path[0]
-    a0 = start_angle + math.pi
     start_line = bresenham_line(
-        _norm(sx + ext * math.cos(start_angle)),
-        _norm(sz + ext * math.sin(start_angle)),
+        _norm(sx + ext * math.cos(start_angle + math.pi)),
+        _norm(sz + ext * math.sin(start_angle + math.pi)),
         sx,
         sz,
     )
@@ -62,7 +61,7 @@ def _stamp_halves(xc, zc, halves, key, silhouette, elev_lut, curve):
 
 
 def _calculate_backtrack_dist(width, radius, dept):
-    return max(1, int(math.ceil(width // 2 - dept + 2)))
+    return max(1, int(math.ceil(width / 2 - dept + 1)))
 
 
 def _walk_path(
@@ -98,36 +97,38 @@ def _walk_path(
             angle_90 = int(round(deg / 90.0) * 90) % 360
         elif not in_ext and sector != prev_sector:
             delta = (sector - prev_sector + 4) % 8 - 4
-            boundary = sector if delta > 0 else prev_sector
+            direction = 1 if delta > 0 else -1
+            abs_delta = abs(delta)
             old_key = (angle_90, flipped)
 
-            # ODD BOUNDARY (45, 135, 225, 315)
-            if boundary % 2 == 1:
-                flipped = not flipped
-                angle_90 = (angle_90 + (90 if delta > 0 else -90)) % 360
-                new_key = (angle_90, flipped)
+            had_odd = False
+            current = prev_sector
+            for _ in range(abs_delta):
+                next_s = (current + direction) % 8
+                boundary = next_s if direction > 0 else current
 
-                _stamp_halves(xc, zc, halves, old_key, silhouette, elev_lut, curve)
+                if boundary % 2 == 1:
+                    # ODD BOUNDARY (45, 135, 225, 315)
+                    flipped = not flipped
+                    angle_90 = (angle_90 + 90 * direction) % 360
+                    had_odd = True
+                else:
+                    # EVEN BOUNDARY (90, 180, 270, 0)
+                    flipped = not flipped
 
-                back_start = max(raw_start, idx - backtrack_steps)
-                for b_idx in range(back_start, idx):
-                    b_xc, b_zc = path[b_idx]
-                    _stamp_halves(
-                        b_xc, b_zc, halves, new_key, silhouette, elev_lut, curve
-                    )
+                current = next_s
 
-            else:
-                # EVEN BOUNDARY (90, 180, 270, 0)
-                flipped = not flipped
-                new_key = (angle_90, flipped)
-                _stamp_halves(xc, zc, halves, old_key, silhouette, elev_lut, curve)
+            new_key = (angle_90, flipped)
 
-                back_start = max(raw_start, idx - dept)
-                for b_idx in range(back_start, idx):
-                    b_xc, b_zc = path[b_idx]
-                    _stamp_halves(
-                        b_xc, b_zc, halves, new_key, silhouette, elev_lut, curve
-                    )
+            _stamp_halves(xc, zc, halves, old_key, silhouette, elev_lut, curve)
+
+            bt = backtrack_steps if had_odd else dept
+            back_start = max(raw_start, idx - bt)
+            for b_idx in range(back_start, idx):
+                b_xc, b_zc = path[b_idx]
+                _stamp_halves(
+                    b_xc, b_zc, halves, new_key, silhouette, elev_lut, curve
+                )
 
         if not in_ext:
             prev_sector = sector
@@ -181,6 +182,9 @@ def assemble_curve(
     end_angle = control_points[-1][-1]
 
     raw_path, _, _ = draw_path(control_points, radius)
+    
+    print(raw_path[663],raw_path[664],raw_path[665],raw_path[666],raw_path[667],raw_path[668],raw_path[669])
+    
     raw_path = [(_norm(pt[0]), _norm(pt[1])) for pt in raw_path]
     path, raw_start, raw_end = _extend_path(raw_path, start_angle, end_angle, dept)
 

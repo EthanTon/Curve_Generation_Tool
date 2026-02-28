@@ -115,7 +115,7 @@ def center_path_tangents(center_path, window=3):
     return angles
 
 
-def optimal_tangent_window(radius, min_window=1, max_window=None):
+def optimal_tangent_window(radius, min_window=3, max_window=None):
     import math
 
     if radius <= 0:
@@ -138,3 +138,6 @@ def ortho(vect2d):
 
 def dist(pt_a, pt_b):
     return ((pt_a[0] - pt_b[0]) ** 2 + (pt_a[1] - pt_b[1]) ** 2) ** 0.5
+
+
+

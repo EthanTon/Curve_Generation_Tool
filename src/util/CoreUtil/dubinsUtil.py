@@ -229,7 +229,7 @@ def int_generate_points_straight(start, end, path, radius):
     if points[-1] != end_pt:
         points.append(end_pt)
 
-    return np.array(points)
+    return np.array(list(dict.fromkeys(points)))
 
 
 def generate_points_straight(start, end, path, radius, point_separation=0.1):
@@ -334,7 +334,7 @@ def int_generate_points_curve(start, end, path, radius):
     if points[-1] != end_pt:
         points.append(end_pt)
 
-    return np.array(points)
+    return np.array(list(dict.fromkeys(points)))
 
 
 def generate_points_curve(start, end, path, radius, point_separation):

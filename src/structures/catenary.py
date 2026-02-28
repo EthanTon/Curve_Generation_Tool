@@ -3,7 +3,6 @@ from ..util.CoreUtil.shapeUtil import (
     bresenham_line,
     bresenham_filled_circle_stepped,
     step_line,
-    double_step_line,
 )
 
 from ..util.CoreUtil.pathUtil import weighted_pca_orthogonal

@@ -802,3 +802,4 @@ def filled_square(xc, yc, r):
         for y in range(yc - r, yc + r + 1):
             points.append((x, y))
     return points
+
