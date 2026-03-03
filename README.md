@@ -1,4 +1,4 @@
-# CurveGen: Minecraft Curve & Structure Assembler
+# CurveGen
 
 Generate Minecraft Sponge Schematic (`.schem`) files or write directly to world saves using [Dubins paths](https://en.wikipedia.org/wiki/Dubins_path). Define a route with headings and elevations, then export a paste-ready schematic complete with configurable track surfaces, pillars, and overhead catenary supports.
 
