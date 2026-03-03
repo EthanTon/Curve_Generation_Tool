@@ -1,56 +1,9 @@
 import math
-
-from util.CoreUtil.curveUtil import draw_path_silhouette
-from util.CoreUtil.shapeUtil import bresenham_line
-from util.CoreUtil.crossSectionUtil import precompute_sections
+from util.CoreUtil.blockUtil import rotate_block_state, mirror_block_state
 from curveAssembly import _norm
 
 
-def _pillar_path(point, angle, thickness, centered=False):
-    """Generate a short perpendicular line for a single pillar."""
-    if thickness == 1:
-        return [point]
-    if centered:
-        pt1 = (
-            _norm(point[0] + thickness * math.cos(-angle)),
-            _norm(point[1] + thickness * math.sin(-angle)),
-        )
-    else:
-        pt1 = point
-    pt2 = (
-        _norm(point[0] + thickness * math.cos(angle)),
-        _norm(point[1] + thickness * math.sin(angle)),
-    )
-    return bresenham_line(pt1[0], pt1[1], pt2[0], pt2[1])
-
-
-def _extend_pillar_path(p_path, angle, dept):
-    """Extend pillar path at both ends for cross-section coverage."""
-    ext = 2 * dept
-    pt1 = (
-        _norm(p_path[0][0] + ext * math.cos(-angle)),
-        _norm(p_path[0][1] + ext * math.sin(-angle)),
-    )
-    pt2 = (
-        _norm(p_path[-1][0] + ext * math.cos(angle)),
-        _norm(p_path[-1][1] + ext * math.sin(angle)),
-    )
-    pre = bresenham_line(pt1[0], pt1[1], p_path[0][0], p_path[0][1])[:-1]
-    post = bresenham_line(p_path[-1][0], p_path[-1][1], pt2[0], pt2[1])[1:]
-    return pre + p_path + post, len(pre), len(pre) + len(p_path)
-
-
-def _pillar_silhouette(p_path, angle, width):
-    return draw_path_silhouette(
-        p_path,
-        (p_path[0][0], p_path[0][-1], angle),
-        (p_path[-1][0], p_path[-1][-1], angle),
-        width,
-    )
-
-
 def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar):
-    """Place cross-section at (xc, zc) for a pillar."""
     center_y = elev_lut.get((xc, zc), 0)
     for block, offsets in section.items():
         for rx, ry, rz in offsets:
@@ -65,15 +18,7 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar):
             pillar.setdefault(block, set()).add(coord)
 
 
-def _walk_pillar_path(p_path, angle, sections, silhouette, elev_lut, coord_map, pillar):
-    angle_90 = int(round(math.degrees(angle) / 90.0) * 90) % 360
-    key = (angle_90, False)
-    for xc, zc in p_path:
-        _stamp(xc, zc, sections[key], silhouette, elev_lut, coord_map, pillar)
-
-
 def _pick_pillar_points(path, pillar_distance):
-    """Select path indices at regular arc-length intervals."""
     if len(path) < 2:
         return [0]
     indices = [0]
@@ -90,23 +35,59 @@ def _pick_pillar_points(path, pillar_distance):
     return indices
 
 
-def assemble(
-    path,
-    tangents,
-    elev_lut,
-    cross_section,
-    cross_section_width,
-    dept,
-    pillar_thickness,
-    pillar_distance,
-    centered=False,
-):
-    """Build pillars along a path. Returns (blocks_dict, path_origin).
+def _precompute_pillar_sections(pillar_sections):
+    sections = {}
+    for i in range(16):
+        angle = i * 22.5
+        within_quadrant = angle % 90
+        quadrant_steps = int(angle // 90)  # number of 90° rotations
 
-    Designed to be called from advanceCurveAssembly with the shared
-    path, tangents, and elevation data already computed by the curve pass.
-    """
-    sections = precompute_sections(cross_section)
+        if within_quadrant <= 45:
+            base_angle = within_quadrant
+            flipped = False
+        else:
+            base_angle = 90 - within_quadrant
+            flipped = True
+
+        base_section = pillar_sections[base_angle]
+        rot_rad = math.radians(quadrant_steps * 90)
+        cos_a = round(math.cos(rot_rad))
+        sin_a = round(math.sin(rot_rad))
+
+        rotated = {}
+        for block, offsets in base_section.items():
+            if flipped:
+                # Mirror across the 45° diagonal = mirror + 1 extra rotation step
+                r_block = rotate_block_state(
+                    mirror_block_state(block), quadrant_steps + 1
+                )
+            else:
+                r_block = rotate_block_state(block, quadrant_steps)
+
+            for ox, oy, oz in offsets:
+                if flipped:
+                    # Mirror across 45° diagonal: swap X and Z
+                    fox, foz = oz, ox
+                else:
+                    fox, foz = ox, oz
+                rx = _norm(cos_a * fox - sin_a * foz)
+                rz = _norm(sin_a * fox + cos_a * foz)
+                rotated.setdefault(r_block, []).append((rx, oy, rz))
+
+        sections[angle] = rotated
+
+    return sections
+
+
+def assemble(
+    path: list,
+    tangents: list,
+    elev_lut: dict,
+    pillar_sections: dict,
+    pillar_distance: int,
+    mask: set,
+):
+    sections = _precompute_pillar_sections(pillar_sections)
     pillar_indices = _pick_pillar_points(path, pillar_distance)
     all_blocks = {}
     origins = []
@@ -114,18 +95,16 @@ def assemble(
     for idx in pillar_indices:
         angle = float(tangents[idx])
         point = (_norm(path[idx][0]), _norm(path[idx][1]))
-
-        p_path = _pillar_path(point, angle, pillar_thickness, centered)
-        full_path, _, _ = _extend_pillar_path(p_path, angle, dept)
-        silhouette = _pillar_silhouette(p_path, angle, cross_section_width)
-
         coord_map = {}
-        pillar = {}
-        _walk_pillar_path(
-            full_path, angle, sections, silhouette, elev_lut, coord_map, pillar
+        stamp_blocks = {}
+
+        key = round(math.degrees(angle) / 22.5) * 22.5 % 360
+
+        _stamp(
+            point[0], point[1], sections[key], mask, elev_lut, coord_map, stamp_blocks
         )
 
-        for block, pts in pillar.items():
+        for block, pts in stamp_blocks.items():
             all_blocks.setdefault(block, set()).update(pts)
 
         cp0_y = elev_lut.get(point, 0)

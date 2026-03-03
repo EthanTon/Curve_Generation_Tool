@@ -29,7 +29,7 @@ Expected JSON — advance (multi cross-section + structures):
     "control_points": [[x, z, angle_degrees], ...],
     "elevation_points": [[x, z, y], ...],
     "cross_sections": {
-        "road": {
+        "main": {
             "schematic": "road.schem",
             "width": 5,
             "dept": 3,
@@ -47,23 +47,72 @@ Expected JSON — advance (multi cross-section + structures):
     "structures": [
         {
             "type": "pillar",
-            "schematic": "pillar.schem",
-            "cross_section_width": 5,
-            "dept": 3,
-            "pillar_thickness": 2,
-            "pillar_distance": 20,
-            "centered": false
+            "cross_section": "bridge",
+            "0": "pillar_0.schem",
+            "22.5": "pillar_22.schem",
+            "45": "pillar_45.schem",
+            "distance": 20
+        },
+        {
+            "type": "catenary",
+            "cross_section": "main",
+            "schematics": ["slice_pole.schem", "slice_1.schem", "...", "slice_track.schem"],
+            "catenary_interval": 20,
+            "base_width": 13,
+            "track_width": 5,
+            "offset": 0
+        },
+        {
+            "type": "wire",
+            "cross_sections": ["main", "bridge"],
+            "schematic": "wire.schem",
+            "points": [[[0, 0], [750, 500]]],
+            "use_step_line": true,
+            "resolve_blocks": true,
+            "override_catenary": false
         }
     ]
 }
 
-Each cross_sections entry names a schematic file (resolved relative to the
-JSON file), per-section "width" and "dept" values, and a list of point-pairs
-marking where that cross-section is active on the path.  Optional slice_axis /
-slice_level work identically to the --slice-axis / --slice-level CLI flags.
+Every cross-section — including "main" — must declare explicit "points"
+(point-pairs) to define which path segments it covers.  There is no implicit
+default; uncovered segments are simply skipped.
 
-Structures are passed through to advanceCurveAssembly.  Any entry with a
-"schematic" key gets its cross_section loaded automatically before dispatch.
+Structures are declared in a top-level "structures" list.  Each entry must
+contain "type" and either "cross_section" (a single name) or "cross_sections"
+(a name or list of names) referencing cross_sections entries.  A structure
+with multiple cross-sections is generated once for each referenced
+cross-section.
+
+Pillar structures supply three schematics keyed by base angle ("0", "22.5",
+"45").  All 16 orientations (0° through 337.5° in 22.5° steps) are derived
+from these three via 90° rotation and mirroring.
+
+Catenary structures supply an ordered list of schematics ("schematics") where
+each file is a vertical cross-section slice.  Index 0 is at the pole (road
+edge) and the last index is at the track intersection (near centre).  The
+number of slices must equal the cantilever length
+(base_width // 2 - track_width // 2 + 1).  "base_width" sets the distance
+between poles across the path and "track_width" is the width of each track
+half.  Each slice is defined as left at 0 degrees and facing centre; track-2
+(right side) slices are automatically mirrored.
+
+Wire structures supply a single schematic ("schematic") whose cross-section
+is stamped along the wire path.  Wires use catenary intersection points as
+their generation base — lines are drawn between consecutive intersection
+points on each track.  The optional "points" field is a list of point-pairs
+(same format as cross-section points) that act as a mask: only catenary
+intersections whose pole position falls within the masked path segments are
+used.  When "points" is omitted the wire generates across the full
+cross-section coverage.  When no catenary data exists for the referenced
+cross-section, the wire falls back to stamping directly on rail block
+positions.  Additional wire options:
+    "use_step_line": true/false (default true)  — true for axis-aligned
+        stepping (step_line), false for diagonal Bresenham (bresenham_line).
+    "resolve_blocks": true/false (default true) — auto-resolve block
+        connectivity (e.g. rail shapes) so connected blocks match.
+    "override_catenary": true/false (default false) — when false, wire
+        blocks that overlap catenary positions are removed.
 """
 
 import argparse
@@ -150,8 +199,124 @@ def _load_cross_section(schematic_path, axis=None, level=None):
     return to_curve_offsets(slice_2d, copy_point=(0, 0), axis=axis)
 
 
+_PILLAR_ANGLE_KEYS = (0, 22.5, 45)
+
+
+def _load_structure(cfg, json_dir):
+    """Resolve a single structure config, loading its schematic(s).
+
+    Every structure must include ``"type"`` and ``"cross_section"`` (a name
+    or list of names) referencing cross_sections entries.
+
+    Returns a structure dict ready for advanceCurveAssembly.
+    """
+    cfg = dict(cfg)  # shallow copy
+
+    # Normalise: accept "cross_section" (str) or "cross_sections" (str/list)
+    raw = cfg.get("cross_sections", cfg.get("cross_section"))
+    if raw is None:
+        raise ValueError(
+            "Every structure must have a 'cross_section' or 'cross_sections' "
+            "field referencing cross_sections entries."
+        )
+    cs_names = [raw] if isinstance(raw, str) else list(raw)
+
+    if cfg.get("type") == "pillar":
+        pillar_sections = {}
+        for angle in _PILLAR_ANGLE_KEYS:
+            str_key = str(angle)
+            if str_key not in cfg:
+                str_key = str(int(angle)) if angle == int(angle) else str(angle)
+            if str_key not in cfg:
+                raise ValueError(
+                    f"Pillar structure missing required schematic for angle {angle}."
+                )
+            schem_path = _resolve_path(json_dir, cfg.pop(str_key))
+            pillar_sections[angle] = _load_cross_section(schem_path)
+
+        return {
+            "type": "pillar",
+            "cross_sections": cs_names,
+            "pillar_sections": pillar_sections,
+            "distance": cfg["distance"],
+        }
+
+    if cfg.get("type") == "catenary":
+        schematics = cfg.pop("schematics", [])
+        if not schematics:
+            raise ValueError(
+                "Catenary structure requires a 'schematics' list of schematic files "
+                "(ordered from pole to track intersection)."
+            )
+        if "base_width" not in cfg:
+            raise ValueError(
+                "Catenary structure requires 'base_width' (distance between poles "
+                "across the path)."
+            )
+        if "track_width" not in cfg:
+            raise ValueError(
+                "Catenary structure requires 'track_width' (width of each track)."
+            )
+        slice_axis = cfg.pop("slice_axis", None)
+        slice_level = cfg.pop("slice_level", None)
+        catenary_cross_section = []
+        for schem_file in schematics:
+            schem_path = _resolve_path(json_dir, schem_file)
+            catenary_cross_section.append(
+                _load_cross_section(schem_path, axis=slice_axis, level=slice_level)
+            )
+        return {
+            "type": "catenary",
+            "cross_sections": cs_names,
+            "catenary_cross_section": catenary_cross_section,
+            "catenary_interval": cfg["catenary_interval"],
+            "base_width": cfg["base_width"],
+            "track_width": cfg["track_width"],
+            "offset": cfg.get("offset", 0),
+        }
+
+    if cfg.get("type") == "wire":
+        if "schematic" not in cfg:
+            raise ValueError(
+                "Wire structure requires a 'schematic' for the wire cross-section."
+            )
+        schem_path = _resolve_path(json_dir, cfg["schematic"])
+        wire_cs = _load_cross_section(
+            schem_path,
+            axis=cfg.get("slice_axis"),
+            level=cfg.get("slice_level"),
+        )
+        # "points" are mask point-pairs (same format as cross-section points)
+        mask_point_pairs = None
+        raw_points = cfg.get("points")
+        if raw_points:
+            mask_point_pairs = [(tuple(pair[0]), tuple(pair[1])) for pair in raw_points]
+        return {
+            "type": "wire",
+            "cross_sections": cs_names,
+            "wire_cross_section": wire_cs,
+            "mask_point_pairs": mask_point_pairs,
+            "use_step_line": cfg.get("use_step_line", True),
+            "resolve_blocks": cfg.get("resolve_blocks", True),
+            "override_catenary": cfg.get("override_catenary", False),
+        }
+
+    # Non-pillar/catenary/wire structures: fall back to single-schematic loading
+    if "schematic" in cfg:
+        schem_path = _resolve_path(json_dir, cfg.pop("schematic"))
+        cfg["cross_sections"] = cs_names
+        cfg["cross_section_data"] = _load_cross_section(
+            schem_path,
+            axis=cfg.pop("slice_axis", None),
+            level=cfg.pop("slice_level", None),
+        )
+    return cfg
+
+
 def _load_advance_cross_sections(cs_config, json_dir):
-    """Load all cross-sections and point-pairs from the JSON cross_sections block.
+    """Load all cross-sections and point-pairs from the JSON cross_sections
+    block.
+
     Returns cross_sections dict keyed by name, each containing
     'cross_section', 'width', 'dept', and 'point_pairs'.
     """
@@ -176,6 +341,7 @@ def _load_advance_cross_sections(cs_config, json_dir):
             raise ValueError(
                 f"Cross-section '{name}' is missing required 'dept' field."
             )
+
         cross_sections[name] = {
             "cross_section": cs_data,
             "width": entry["width"],
@@ -187,23 +353,15 @@ def _load_advance_cross_sections(cs_config, json_dir):
     return cross_sections
 
 
-def _load_advance_structures(struct_configs, json_dir):
-    """Resolve schematic paths in structure configs, loading cross-sections.
+def _load_structures(raw_structures, json_dir):
+    """Load the top-level structures list from JSON.
 
-    Returns a list of structure dicts ready for assemble_advance_curve.
+    Returns a list of resolved structure dicts ready for
+    advanceCurveAssembly.
     """
-    resolved = []
-    for cfg in struct_configs:
-        cfg = dict(cfg)  # shallow copy
-        if "schematic" in cfg:
-            schem_path = _resolve_path(json_dir, cfg.pop("schematic"))
-            cfg["cross_section"] = _load_cross_section(
-                schem_path,
-                axis=cfg.pop("slice_axis", None),
-                level=cfg.pop("slice_level", None),
-            )
-        resolved.append(cfg)
-    return resolved
+    if not raw_structures:
+        return []
+    return [_load_structure(s, json_dir) for s in raw_structures]
 
 
 def _is_world_dir(path):
@@ -391,12 +549,17 @@ def main():
             data["cross_sections"],
             json_dir,
         )
-        structures = _load_advance_structures(data.get("structures", []), json_dir)
+
+        structures = _load_structures(
+            data.get("structures", []),
+            json_dir,
+        )
 
         blocks_dict, path_origin = assemble_advance_curve(
             control_points=control_points,
             radius=args.radius,
             cross_sections=cross_sections,
+            structures=structures,
             elevation_control_points=elevation_points,
             step_size=args.step_size,
             symmetrical=args.symmetrical,

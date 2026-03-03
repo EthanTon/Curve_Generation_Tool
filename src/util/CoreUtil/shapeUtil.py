@@ -64,12 +64,8 @@ def step_line(x0, y0, x1, y1):
 
         e2 = 2 * err
 
-        # KEY MODIFICATION:
-        # If both conditions are met, a diagonal jump is about to happen.
-        # We insert an intermediate pixel to ensure face-to-face contact.
+
         if e2 > -dy and e2 < dx:
-            # You can choose to move in X or Y first.
-            # Moving in X first is the standard convention here.
             points.append((x0 + sx, y0))
 
         if e2 > -dy:

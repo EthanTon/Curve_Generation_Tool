@@ -55,6 +55,11 @@ _RAIL_BLOCKS = frozenset(
         "minecraft:activator_rail",
     }
 )
+
+_REDSTONE_WIRE = "minecraft:redstone_wire"
+_OPPOSITE_DIR = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+
 _CURVE_RAIL_BLOCKS = frozenset({"minecraft:rail"})
 
 _BLOCK_RE = re.compile(r"^(?P<id>[a-z_:]+?)(?:\[(?P<states>.+)])?$")
@@ -226,9 +231,6 @@ def _infer_rail_shape(block_id, connections, ascending):
 
 
 def resolve_rail_shapes(blocks_dict, rail_groups=None):
-    """Resolve rail shape properties based on neighbor connectivity.
-    rail_groups: list of position-sets resolved independently (None = one group).
-    """
     pos_to_block = {}
     for block, coords in blocks_dict.items():
         if not is_rail_block(block):
@@ -273,3 +275,123 @@ def resolve_rail_shapes(blocks_dict, rail_groups=None):
             new_block = resolved.get(tuple(pos), block)
             new_dict.setdefault(new_block, []).append(pos)
     return new_dict
+
+
+def resolve_redstone_wire(blocks_dict):
+    """Resolve connections for redstone wire (up, side, none)."""
+    wire_positions = set()
+    for block, coords in blocks_dict.items():
+        block_id, _ = parse_block(block)
+        if block_id == _REDSTONE_WIRE:
+            for pos in coords:
+                wire_positions.add(tuple(pos))
+
+    if not wire_positions:
+        return blocks_dict
+
+    resolved = {}
+    for block, coords in blocks_dict.items():
+        block_id, states = parse_block(block)
+        if block_id != _REDSTONE_WIRE:
+            continue
+
+        for pos in coords:
+            x, y, z = pos
+            connected_dirs = []
+
+            for dname, dx, dz in _CARDINALS:
+                if (x + dx, y + 1, z + dz) in wire_positions:
+                    states[dname] = "up"
+                    connected_dirs.append(dname)
+                elif (x + dx, y, z + dz) in wire_positions or (
+                    x + dx,
+                    y - 1,
+                    z + dz,
+                ) in wire_positions:
+                    states[dname] = "side"
+                    connected_dirs.append(dname)
+                else:
+                    states[dname] = "none"
+
+            if len(connected_dirs) == 1:
+                opposite = _OPPOSITE_DIR[connected_dirs[0]]
+                states[opposite] = "side"
+
+            resolved[tuple(pos)] = serialize_block(block_id, states)
+
+    new_dict = {}
+    for block, coords in blocks_dict.items():
+        block_id, _ = parse_block(block)
+        if block_id != _REDSTONE_WIRE:
+            new_dict.setdefault(block, []).extend(coords)
+            continue
+
+        for pos in coords:
+            new_block = resolved.get(tuple(pos), block)
+            new_dict.setdefault(new_block, []).append(pos)
+
+    return new_dict
+
+
+def _has_directional_booleans(states):
+    """Return True if the block state has north/east/south/west boolean keys."""
+    dir_keys = {"north", "east", "south", "west"}
+    if dir_keys - states.keys():
+        return False
+    return all(states[d] in ("true", "false") for d in dir_keys)
+
+
+def resolve_connectable_blocks(blocks_dict):
+    all_positions = set()
+    for coords in blocks_dict.values():
+        for pos in coords:
+            all_positions.add(tuple(pos))
+
+    if not all_positions:
+        return blocks_dict
+
+    pos_to_block = {}
+    for block, coords in blocks_dict.items():
+        if is_rail_block(block):
+            continue
+        block_id, states = parse_block(block)
+        if not _has_directional_booleans(states):
+            continue
+        for pos in coords:
+            pos_to_block[tuple(pos)] = block
+
+    if not pos_to_block:
+        return blocks_dict
+
+    resolved = {}
+    for pos, block in pos_to_block.items():
+        x, y, z = pos
+        block_id, states = parse_block(block)
+
+        for dname, dx, dz in _CARDINALS:
+            connected = (
+                (x + dx, y, z + dz) in all_positions
+                or (x + dx, y + 1, z + dz) in all_positions
+                or (x + dx, y - 1, z + dz) in all_positions
+            )
+            states[dname] = "true" if connected else "false"
+
+        resolved[pos] = serialize_block(block_id, states)
+
+    new_dict = {}
+    for block, coords in blocks_dict.items():
+        block_id, states = parse_block(block)
+        if not _has_directional_booleans(states) or is_rail_block(block):
+            new_dict.setdefault(block, []).extend(coords)
+            continue
+        for pos in coords:
+            new_block = resolved.get(tuple(pos), block)
+            new_dict.setdefault(new_block, []).append(pos)
+    return new_dict
+
+
+def resolve_block_connections(blocks_dict, rail_groups=None):
+    blocks_dict = resolve_rail_shapes(blocks_dict, rail_groups=rail_groups)
+    blocks_dict = resolve_connectable_blocks(blocks_dict)
+    blocks_dict = resolve_redstone_wire(blocks_dict) 
+    return blocks_dict

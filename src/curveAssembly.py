@@ -13,7 +13,6 @@ def _norm(v):
 
 
 def _extend_path(path, start_angle, end_angle, dept):
-    """Extend path at both ends for cross-section coverage. Returns (full_path, raw_start, raw_end)."""
     ext = 2 * dept
     sx, sz = path[0]
     start_line = bresenham_line(
@@ -36,7 +35,6 @@ def _extend_path(path, start_angle, end_angle, dept):
 
 
 def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=None):
-    """Place cross-section at (xc, zc), resolving conflicts via coord_map."""
     center_y = elev_lut.get((xc, zc), 0)
     for block, offsets in section.items():
         is_rail = rail_coords is not None and is_rail_block(block)
@@ -55,7 +53,6 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=
 
 
 def _stamp_halves(xc, zc, halves, key, silhouette, elev_lut, curve):
-    """Stamp all cross-section halves at (xc, zc) with orientation key."""
     for sections, coord_map, rc in halves:
         _stamp(xc, zc, sections[key], silhouette, elev_lut, coord_map, curve, rc)
 
@@ -78,7 +75,6 @@ def _walk_path(
     radius,
     dept,
 ):
-    """Walk the path, handling sector transitions with dynamic backtracking."""
     prev_sector = None
     flipped = False
     angle_90 = 0
@@ -145,11 +141,6 @@ def assemble_curve_path(
     step_size=1,
     block="minecraft:beacon",
 ):
-    """Build a single-block-wide path and return *(blocks_dict, path_origin)*.
-
-    *path_origin* is the (x, y, z) of the first control point on the curve
-    and is used at export time to set the schematic offset.
-    """
     path, _, _ = draw_path(control_points, radius)
     norm_path = [(_norm(pt[0]), _norm(pt[1])) for pt in path]
     elev_lut = generate_elevation_lookup(
@@ -183,7 +174,6 @@ def assemble_curve(
 
     raw_path, _, _ = draw_path(control_points, radius)
     
-    print(raw_path[663],raw_path[664],raw_path[665],raw_path[666],raw_path[667],raw_path[668],raw_path[669])
     
     raw_path = [(_norm(pt[0]), _norm(pt[1])) for pt in raw_path]
     path, raw_start, raw_end = _extend_path(raw_path, start_angle, end_angle, dept)
@@ -239,7 +229,6 @@ def assemble_curve(
         if rail_groups:
             result = resolve_rail_shapes(result, rail_groups)
 
-    # Path origin = first control point position (used as export origin)
     cp0_xz = raw_path[0]
     cp0_y = elev_lut.get(cp0_xz, 0)
     path_origin = (cp0_xz[0], cp0_y, cp0_xz[1])

@@ -139,9 +139,6 @@ def _to_pt(x, y=None):
 
 
 def _trim_to_junction(points, junction, at_end=True):
-    """Trim a segment's points so it stops at the junction point.
-    If at_end=True, finds the LAST occurrence of junction and drops everything after.
-    If at_end=False, finds the FIRST occurrence and drops everything before."""
     if not points:
         return points
     if at_end:

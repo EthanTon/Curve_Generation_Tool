@@ -30,21 +30,6 @@ def parse_cross_section(blocks_dict):
 
 
 def cross_section_at_y(blocks_dict, y_level, offset=(0, 0, 0)):
-    """Return a horizontal cross-section at *y_level* (world coordinates).
-
-    Parameters
-    ----------
-    blocks_dict : dict[str, list[tuple]]
-        Mapping of block strings to lists of (x, y, z) positions in **local**
-        schematic coordinates.
-    y_level : int
-        The Y level to slice at, in **world** coordinates (i.e. accounting
-        for the schematic offset).
-    offset : tuple[int, int, int], optional
-        The (ox, oy, oz) offset stored in the schematic.  Local positions are
-        shifted by this offset before the slice comparison, so the returned
-        (x, z) pairs are in world coordinates.
-    """
     ox, oy, oz = offset
     result = {}
     for block_str, positions in blocks_dict.items():
@@ -81,26 +66,6 @@ def cross_section_at_z(blocks_dict, z_level, offset=(0, 0, 0)):
 
 
 def to_curve_offsets(cross_section_2d, copy_point, axis="z"):
-    """Convert a 2D cross-section slice to 3D offsets relative to a copy/paste point.
-
-    The returned dict maps block strings to lists of (ox, oy, oz) offsets
-    suitable for use with ``assemble_curve``.  ``ox`` is perpendicular to the
-    default path direction, ``oy`` is vertical, and ``oz`` is along the path.
-
-    Parameters
-    ----------
-    cross_section_2d : dict[str, list[tuple]]
-        Output from one of the ``cross_section_at_*`` functions.
-    copy_point : tuple
-        The paste/copy reference point **in the same coordinate space** as the
-        values in *cross_section_2d*.
-
-        * axis ``'z'`` (from ``cross_section_at_z``) → ``(x, y)``
-        * axis ``'x'`` (from ``cross_section_at_x``) → ``(y, z)``
-        * axis ``'y'`` (from ``cross_section_at_y``) → ``(x, z)``
-    axis : str
-        Which axis the slice was taken along (``'x'``, ``'y'``, or ``'z'``).
-    """
     offsets = {}
     cp0, cp1 = copy_point
 
@@ -123,10 +88,9 @@ def to_curve_offsets(cross_section_2d, copy_point, axis="z"):
     return offsets
 
 
-def precompute_sections(cross_section):
-    """Precompute rotated cross-sections for 4 angles × 2 flip states."""
+def precompute_sections(cross_section, angles=(0, 90, 180, 270)):
     sections = {}
-    for angle_deg in (0, 90, 180, 270):
+    for angle_deg in angles:
         angle_rad = math.radians(angle_deg)
         steps = angle_deg // 90
         cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)

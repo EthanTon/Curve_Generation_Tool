@@ -1,13 +1,8 @@
-from ..util.CoreUtil.shapeUtil import step_line
-
-
-def _elevation_at(x, z, elevation_lut, default=0):
-    """Look up the ground elevation for a 2-D point from the flat LUT."""
-    return elevation_lut.get((int(round(x)), int(round(z))), default)
+from util.CoreUtil.shapeUtil import step_line, bresenham_line
+from util.CoreUtil.blockUtil import resolve_block_connections
 
 
 def _nearest_elevation(x, z, elevation_lut, default=0):
-    """Spiral outward from (x, z) until an elevation LUT entry is found."""
     ix, iz = int(round(x)), int(round(z))
     if (ix, iz) in elevation_lut:
         return elevation_lut[(ix, iz)]
@@ -22,45 +17,112 @@ def _nearest_elevation(x, z, elevation_lut, default=0):
     return default
 
 
-def generate_wire(intersections, elevation_lut):
-    if not intersections or len(intersections) < 2:
-        return []
+def _draw_lines(points, elevation_lut, use_step_line):
+    line_func = step_line if use_step_line else bresenham_line
+    result = []
 
-    wire = []
+    for i in range(len(points) - 1):
+        x0, z0 = int(round(points[i][0])), int(round(points[i][1]))
+        x1, z1 = int(round(points[i + 1][0])), int(round(points[i + 1][1]))
 
-    for i in range(len(intersections) - 1):
-        x0, z0 = intersections[i]
-        x1, z1 = intersections[i + 1]
-
-        if x0 is None or z0 is None or x1 is None or z1 is None:
-            continue
-
-        # Resolve the y-level at each intersection (pole) from the
-        # ground elevation LUT.
         y_start = _nearest_elevation(x0, z0, elevation_lut)
         y_end = _nearest_elevation(x1, z1, elevation_lut)
 
-        segment_2d = step_line(int(x0), int(z0), int(x1), int(z1))
-        seg_len = len(segment_2d)
+        segment = line_func(x0, z0, x1, z1)
+        seg_len = len(segment)
 
-        for j, (x, z) in enumerate(segment_2d):
-            # Skip the first pixel of subsequent segments to avoid
-            # duplicating the shared junction pixel.
+        for j, (x, z) in enumerate(segment):
+            # Avoid duplicating connecting points between segments
             if i > 0 and j == 0:
                 continue
+            t = j / (seg_len - 1) if seg_len > 1 else 0.0
+            y = round(y_start + t * (y_end - y_start))
+            result.append((x, y, z))
 
-            # Linearly interpolate y between the two intersection
-            # elevations based on position within the segment.
-            if seg_len > 1:
-                t = j / (seg_len - 1)
-            else:
-                t = 0.0
-            y = y_start + t * (y_end - y_start)
-
-            wire.append((x, z, round(y)))
-
-    return wire
+    return result
 
 
-def apply_elevation(wire, elevation_lut):
-    return [(x, z, _elevation_at(x, z, elevation_lut)) for x, z in wire]
+def _filter_intersections(intersections, pole_indices, active_ranges):
+    kept = []
+    for pt, pi in zip(intersections, pole_indices):
+        for s, e in active_ranges:
+            if s <= pi <= e:
+                kept.append(pt)
+                break
+    return kept
+
+
+def _stamp_cross_section(base_points, wire_cross_section):
+    blocks = {}
+    for bx, by, bz in base_points:
+        for block, offsets in wire_cross_section.items():
+            for rx, ry, rz in offsets:
+                pos = (bx + rx, by + ry, bz + rz)
+                blocks.setdefault(block, set()).add(pos)
+    return blocks
+
+
+def assemble(
+    wire_cross_section,
+    elevation_lut,
+    t1_intersections=None,
+    t2_intersections=None,
+    pole_indices=None,
+    mask_ranges=None,
+    track_rail_coords=None,
+    use_step_line=True,
+    resolve_blocks=True,
+    override_catenary=False,
+    catenary_positions=None,
+    t1_path_end=None,
+    t2_path_end=None,
+    path_end_index=None,
+):
+    has_poles = t1_intersections and t2_intersections and pole_indices
+    can_extend = t1_path_end and t2_path_end
+
+    if has_poles:
+        t1_pts = list(t1_intersections)
+        t2_pts = list(t2_intersections)
+        p_indices = list(pole_indices)
+
+        if can_extend:
+            t1_pts.append(t1_path_end)
+            t2_pts.append(t2_path_end)
+            idx = path_end_index if path_end_index is not None else (p_indices[-1] + 1)
+            p_indices.append(idx)
+
+        if mask_ranges is not None:
+            t1_filtered = _filter_intersections(t1_pts, p_indices, mask_ranges)
+            t2_filtered = _filter_intersections(t2_pts, p_indices, mask_ranges)
+        else:
+            t1_filtered, t2_filtered = t1_pts, t2_pts
+
+        base_points = []
+        if len(t1_filtered) >= 2:
+            base_points.extend(_draw_lines(t1_filtered, elevation_lut, use_step_line))
+        if len(t2_filtered) >= 2:
+            base_points.extend(_draw_lines(t2_filtered, elevation_lut, use_step_line))
+
+    elif track_rail_coords:
+        base_points = list(track_rail_coords)
+    else:
+        return {}
+
+    if not base_points:
+        return {}
+
+    blocks = _stamp_cross_section(base_points, wire_cross_section)
+
+    if resolve_blocks and blocks:
+        blocks_list = {b: list(pts) for b, pts in blocks.items()}
+        blocks_list = resolve_block_connections(blocks_list)
+        blocks = {b: set(pts) for b, pts in blocks_list.items()}
+
+    if not override_catenary and catenary_positions:
+        for block in list(blocks.keys()):
+            blocks[block] -= catenary_positions
+            if not blocks[block]:
+                del blocks[block]
+
+    return blocks

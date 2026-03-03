@@ -5,16 +5,10 @@ from ..CoreUtil.maskingUtil import mask_all
 
 
 def _points_match(a, b):
-    """Compare two points by their first 2 coordinates (x, y), ignoring z."""
     return np.array_equal(np.asarray(a)[:2], np.asarray(b)[:2])
 
 
 def _nearest_path_index(path, point, tolerance=None):
-    """Return the index of the path point closest to `point` (2D).
-
-    If *tolerance* is given the match must be within that distance,
-    otherwise the closest point is returned unconditionally.
-    """
     target = np.asarray(point, dtype=float)[:2]
     best_idx = None
     best_dist = np.inf
@@ -37,7 +31,6 @@ def generate_elevation_lookup(
         start_pt = elevation_control_points[i]
         end_pt = elevation_control_points[i + 1]
 
-        # Find the indices in the path closest to the start and end control points
         start_idx = _nearest_path_index(path, start_pt)
         end_idx = _nearest_path_index(path, end_pt)
 
@@ -50,11 +43,9 @@ def generate_elevation_lookup(
                 f"Invalid control point: {end_pt} was not found in the path."
             )
 
-        # Determine the z levels for the start and end control points
         z_start = start_pt[2]
         z_end = end_pt[2]
 
-        # Generate the elevation mask for this segment of the path
         segment_lut = generate_elevation_mask(
             path,
             base_width,
@@ -128,8 +119,6 @@ def generate_elevation_mask(
 
     lut: dict[tuple, float] = {}
 
-    # Seed the segment endpoints so path points at the control-point
-    # locations are always present, even if path_boundaries skips them.
     start_key = tuple(int(c) for c in path[start_idx][:2])
     lut[start_key] = z_start
     if z_end is not None:
@@ -137,15 +126,10 @@ def generate_elevation_mask(
         lut[end_key] = z_end
 
     if elevation_change == 0 or z_end is None:
-        # Flat segment – every mask layer shares the same y level.
         for point_set in masks:
             for pt in point_set:
                 lut[pt] = z_start
     else:
-        # Distribute the elevation change evenly across all mask layers,
-        # using the *largest* interval possible between successive y-level
-        # changes.  We linearly map the mask index to the elevation range
-        # so that the first mask is at z_start and the last at z_end.
         for i, point_set in enumerate(masks):
             if num_masks > 1:
                 level = round(elevation_change * i / (num_masks - 1))
