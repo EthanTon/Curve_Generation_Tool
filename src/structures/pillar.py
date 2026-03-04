@@ -61,7 +61,6 @@ def _precompute_pillar_sections(pillar_sections):
         rotated = {}
         for block, offsets in base_section.items():
             if flipped:
-                # Mirror across the 45° diagonal = mirror + 1 extra rotation step
                 r_block = rotate_block_state(
                     mirror_block_state(block), quadrant_steps + 1
                 )
@@ -70,8 +69,8 @@ def _precompute_pillar_sections(pillar_sections):
 
             for ox, oy, oz in offsets:
                 if flipped:
-                    # Mirror across 45° diagonal: swap X and Z
-                    fox, foz = oz, ox
+                    # Mirror across 45° diagonal: swap X and Z, negate to face outward
+                    fox, foz = -oz, -ox
                 else:
                     fox, foz = ox, oz
                 rx = _norm(cos_a * fox - sin_a * foz)
