@@ -3,7 +3,8 @@ from util.CoreUtil.blockUtil import rotate_block_state, mirror_block_state
 from curveAssembly import _norm
 
 
-def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar):
+def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar, min_y_lut=None):
+    use_min_y = min_y_lut is not None
     center_y = elev_lut.get((xc, zc), 0)
     for block, offsets in section.items():
         for rx, ry, rz in offsets:
@@ -11,6 +12,9 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar):
             if (wx, wz) not in silhouette:
                 continue
             wy = elev_lut.get((wx, wz), center_y) + ry
+            if use_min_y:
+                if wy < min_y_lut((wx, wz)):
+                    continue
             coord = (wx, wy, wz)
             if coord in coord_map and coord_map[coord] != block:
                 pillar[coord_map[coord]].discard(coord)
@@ -86,6 +90,7 @@ def assemble(
     pillar_sections: dict,
     pillar_distance: int,
     mask: set,
+    min_y_lut=None,
 ):
     sections = _precompute_pillar_sections(pillar_sections)
     pillar_indices = _pick_pillar_points(path, pillar_distance)
@@ -101,7 +106,14 @@ def assemble(
         key = round(math.degrees(angle) / 22.5) * 22.5 % 360
 
         _stamp(
-            point[0], point[1], sections[key], mask, elev_lut, coord_map, stamp_blocks
+            point[0],
+            point[1],
+            sections[key],
+            mask,
+            elev_lut,
+            coord_map,
+            stamp_blocks,
+            min_y_lut,
         )
 
         for block, pts in stamp_blocks.items():

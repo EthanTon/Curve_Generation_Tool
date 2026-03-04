@@ -56,9 +56,10 @@ Expected JSON — advance (multi cross-section + structures):
         {
             "type": "catenary",
             "cross_section": "main",
-            "schematics": ["slice_pole.schem", "slice_1.schem", "...", "slice_track.schem"],
+            "0": "catenary_0.schem",
+            "22.5": "catenary_22.schem",
+            "45": "catenary_45.schem",
             "catenary_interval": 20,
-            "base_width": 13,
             "track_width": 5,
             "offset": 0
         },
@@ -242,38 +243,35 @@ def _load_structure(cfg, json_dir):
         }
 
     if cfg.get("type") == "catenary":
-        schematics = cfg.pop("schematics", [])
-        if not schematics:
-            raise ValueError(
-                "Catenary structure requires a 'schematics' list of schematic files "
-                "(ordered from pole to track intersection)."
-            )
-        if "base_width" not in cfg:
-            raise ValueError(
-                "Catenary structure requires 'base_width' (distance between poles "
-                "across the path)."
-            )
-        if "track_width" not in cfg:
-            raise ValueError(
-                "Catenary structure requires 'track_width' (width of each track)."
-            )
-        slice_axis = cfg.pop("slice_axis", None)
-        slice_level = cfg.pop("slice_level", None)
-        catenary_cross_section = []
-        for schem_file in schematics:
-            schem_path = _resolve_path(json_dir, schem_file)
-            catenary_cross_section.append(
-                _load_cross_section(schem_path, axis=slice_axis, level=slice_level)
-            )
-        return {
-            "type": "catenary",
-            "cross_sections": cs_names,
-            "catenary_cross_section": catenary_cross_section,
-            "catenary_interval": cfg["catenary_interval"],
-            "base_width": cfg["base_width"],
-            "track_width": cfg["track_width"],
-            "offset": cfg.get("offset", 0),
-        }
+            if "track_width" not in cfg:
+                raise ValueError(
+                    "Catenary structure requires 'track_width' (width of each track)."
+                )
+            if "catenary_interval" not in cfg:
+                raise ValueError(
+                    "Catenary structure requires 'catenary_interval' (distance between poles)."
+                )
+                
+            catenary_sections = {}
+            for angle in _PILLAR_ANGLE_KEYS:
+                str_key = str(angle)
+                if str_key not in cfg:
+                    str_key = str(int(angle)) if angle == int(angle) else str(angle)
+                if str_key not in cfg:
+                    raise ValueError(
+                        f"Catenary structure missing required schematic for angle {angle}."
+                    )
+                schem_path = _resolve_path(json_dir, cfg.pop(str_key))
+                catenary_sections[angle] = _load_cross_section(schem_path)
+
+            return {
+                "type": "catenary",
+                "cross_sections": cs_names,
+                "catenary_sections": catenary_sections,
+                "catenary_interval": cfg["catenary_interval"],
+                "track_width": cfg["track_width"],
+                "offset": cfg.get("offset", 0),
+            }
 
     if cfg.get("type") == "wire":
         if "schematic" not in cfg:

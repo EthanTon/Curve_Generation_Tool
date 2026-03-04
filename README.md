@@ -139,11 +139,12 @@ Places structural supports at regular intervals. Requires three schematics keyed
 - `distance`: Interval between pillars.
 
 **B. Catenary**
-Overhead wire supports built from an ordered list of vertical slices.
+Overhead wire supports placed at regular intervals. Like pillars, catenaries require three schematics keyed by base angle; all 16 compass orientations (in 22.5° steps) are derived from these three via 90° rotation and mirroring.
 
-- `schematics`: Array of schematic files. Index `0` is at the pole (road edge), and the last index is at the track intersection (near center). The number of slices must equal the cantilever length (`base_width // 2 - track_width // 2 + 1`). Track-2 (right side) slices are automatically mirrored.
+- `0`: Schematic for 0°.
+- `22.5`: Schematic for 22.5°.
+- `45`: Schematic for 45°.
 - `catenary_interval`: Distance between catenary poles.
-- `base_width`: Distance between poles across the path.
 - `track_width`: Width of each track half.
 
 **C. Wire**
@@ -201,14 +202,10 @@ Stamps a cross-section along a wire path. Wires use catenary intersection points
 		{
 			"type": "catenary",
 			"cross_section": "standard",
-			"schematics": [
-				"catPole.schem",
-				"catCant1.schem",
-				"catCant2.schem",
-				"catCant3.schem"
-			],
+			"0": "catenary0.schem",
+			"22.5": "catenary22.schem",
+			"45": "catenary45.schem",
 			"catenary_interval": 36,
-			"base_width": 13,
 			"track_width": 7,
 			"offset": 0
 		},
@@ -237,14 +234,10 @@ Stamps a cross-section along a wire path. Wires use catenary intersection points
 		{
 			"type": "catenary",
 			"cross_section": "bridge",
-			"schematics": [
-				"bridgeCatPole.schem",
-				"catCant1.schem",
-				"catCant2.schem",
-				"catCant3.schem"
-			],
+			"0": "bridgeCatenary0.schem",
+			"22.5": "bridgeCatenary22.schem",
+			"45": "bridgeCatenary45.schem",
 			"catenary_interval": 36,
-			"base_width": 13,
 			"track_width": 7,
 			"offset": 0
 		}
@@ -256,19 +249,17 @@ Stamps a cross-section along a wire path. Wires use catenary intersection points
 
 CurveGen uses a specific heading reference point tied directly to Minecraft's coordinate system:
 
-* **0 Degrees:** Points **East** (Positive +X axis).
-* **90 Degrees:** Points **South** (Positive +Z axis).
+- **0 Degrees:** Points **East** (Positive +X axis).
+- **90 Degrees:** Points **South** (Positive +Z axis).
 
 ### Cross-Section Orientation & Symmetry
 
 When designing and saving your cross-section `.schem` files, they must follow a strict orientation to generate correctly—especially when using symmetrical modes.
 
-* **Axis Alignment:** The major axis of your cross-section must be aligned to **North/South** (Z axis).
-* **Dimension Definitions (Symmetrical Mode):**
-* **`dept`**: Refers to the number of block changes along the **X-axis**.
-* **`width`**: Refers to the number of block changes along the **Z-axis**.
-
-
+- **Axis Alignment:** The major axis of your cross-section must be aligned to **North/South** (Z axis).
+- **Dimension Definitions (Symmetrical Mode):**
+- **`dept`**: Refers to the number of block changes along the **X-axis**.
+- **`width`**: Refers to the number of block changes along the **Z-axis**.
 
 ### Structure Rules & Origins
 
@@ -280,17 +271,14 @@ Pillars are **not symmetrical**. They are placed exactly as defined by their thr
 
 #### 2. Catenaries (Optional for Wires)
 
-Catenaries are an optional support structure for wires. When defining the vertical slice schematics for a catenary:
-
-* **Order:** Slices are defined starting from the **end (outer edge)** moving inward toward the **center block**.
-* **Copy Origin:** **Crucial:** Every single slice schematic *must* be copied using the exact same **center block** as your clipboard origin.
+Catenaries are an optional support structure for wires. Like pillars, catenaries are **not symmetrical**. They use three base-angle schematics (0°, 22.5°, 45°), which the tool rotates to cover all 16 orientations.
 
 #### 3. Wires
 
 The vertical and horizontal placement of a wire is dictated entirely by where you stand when you copy the schematic.
 
-* **Copy Origin Offset:** The wire generates exactly relative to its copy origin.
-* *Example:* If you want a wire to float exactly 5 blocks above the path with no X or Z shift, you must position yourself directly below the wire, exactly 5 blocks down, before copying the wire block to your schematic.
+- **Copy Origin Offset:** The wire generates exactly relative to its copy origin.
+- _Example:_ If you want a wire to float exactly 5 blocks above the path with no X or Z shift, you must position yourself directly below the wire, exactly 5 blocks down, before copying the wire block to your schematic.
 
 ## Exporting
 
@@ -298,4 +286,3 @@ The tool automatically determines how to export the final blocks based on the `-
 
 - **`.schem` Output:** If the output path has a file extension, it generates a Sponge Schematic. The schematic's offset will automatically adjust so the curve's origin sits at $(0, 0, 0)$ relative to your paste position.
 - **World Directory Output:** If the output path is a directory (has no extension), the script attempts to write the blocks directly into the region files of a Minecraft world save. Make sure `--dimension` is set correctly (`overworld`, `nether`, or `end`).
-
