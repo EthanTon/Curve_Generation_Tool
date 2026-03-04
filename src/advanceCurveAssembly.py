@@ -300,9 +300,9 @@ def _generate_pillars(
         curve.setdefault(block, set()).add(coord)
 
 
-
 def _generate_catenaries(
     path,
+    tangents,
     structures,
     cross_sections,
     cross_sections_index_pairs,
@@ -315,11 +315,7 @@ def _generate_catenaries(
     catenary_positions = set()
     catenary_intersection_data = {}
 
-    # ----------------------------------------------------------------
-    # 1. Collect all catenary structures with their index ranges so
-    #    we can detect adjacency and order them along the path.
-    # ----------------------------------------------------------------
-    catenary_entries = []  # (cs_name, struct, global_start, global_end)
+    catenary_entries = []
     for cs_name in cross_sections:
         halves = curve_halves.get(cs_name, [])
         if len(halves) < 2:
@@ -330,15 +326,10 @@ def _generate_catenaries(
                 if s <= e:
                     catenary_entries.append((cs_name, struct, s, e))
 
-    # Sort by start index so we process them along the path
     catenary_entries.sort(key=lambda x: x[2])
 
-    # ----------------------------------------------------------------
-    # 2. Build adjacency: entry[i] is "followed by" entry[j] if
-    #    entry[i].end == entry[j].start.
-    # ----------------------------------------------------------------
-    has_successor = set()   # indices into catenary_entries that have a successor
-    has_predecessor = set()  # indices that have a predecessor
+    has_successor = set()
+    has_predecessor = set()
     for i in range(len(catenary_entries)):
         for j in range(len(catenary_entries)):
             if i == j:
@@ -347,23 +338,16 @@ def _generate_catenaries(
                 has_successor.add(i)
                 has_predecessor.add(j)
 
-    # ----------------------------------------------------------------
-    # 3. Generate catenaries in order, propagating offset across
-    #    adjacent sections.
-    # ----------------------------------------------------------------
-    # Track the offset that should carry forward from one section
-    # to the next.  Keyed by the global boundary index.
-    boundary_offsets = {}  # boundary_index -> offset for next section
+    boundary_offsets = {}
 
     for entry_idx, (cs_name, struct, s, e) in enumerate(catenary_entries):
         halves = curve_halves.get(cs_name, [])
         cs_mask = cross_section_silhouettes.get(cs_name, set())
 
-        catenary_cross_section = struct.get("catenary_cross_section", [])
-        if not catenary_cross_section:
+        catenary_sections = struct.get("catenary_sections")
+        if not catenary_sections:
             continue
 
-        # Collect only rail XZ footprints from each half for this segment
         track1 = set()
         track2 = set()
         for block, pts in halves[0].items():
@@ -375,35 +359,30 @@ def _generate_catenaries(
                 for coord in pts:
                     track2.add((coord[0], coord[2]))
 
-        # Determine offset: if a predecessor ended at our start index,
-        # use the propagated offset.  Otherwise use the struct's own.
         if entry_idx in has_predecessor and s in boundary_offsets:
             effective_offset = boundary_offsets[s]
         else:
             effective_offset = struct.get("offset", 0)
 
-        # If this section is followed by an adjacent catenary, skip the
-        # trailing pole (the next section will start near that boundary).
         skip_trailing = entry_idx in has_successor
 
         sub_path = path[s : e + 1]
+        sub_tangents = tangents[s : e + 1]
 
-        result, intersection_info = assemble_catenary(
+        result, _, intersection_info = assemble_catenary(
             path=sub_path,
-            path_silhouette=cs_mask,
-            elevation_lut=elev_lut,
-            base_width=struct["base_width"],
+            tangents=sub_tangents,
+            elev_lut=elev_lut,
             track1=track1,
             track2=track2,
             track_width=struct["track_width"],
-            catenary_cross_section=catenary_cross_section,
+            catenary_sections=catenary_sections,
             catenary_interval=struct["catenary_interval"],
             offset=effective_offset,
             min_y_lut=min_y_lut,
             skip_trailing_pole=skip_trailing,
         )
 
-        # Merge catenary blocks into the combined curve, OVERRIDING existing blocks
         for block, pts in result.items():
             for existing_block in list(curve.keys()):
                 if existing_block != block:
@@ -413,7 +392,6 @@ def _generate_catenaries(
             curve.setdefault(block, set()).update(pts)
             catenary_positions.update(pts)
 
-        # Accumulate intersection data, offsetting local indices to global
         cs_data = catenary_intersection_data.setdefault(
             cs_name,
             {
@@ -422,19 +400,12 @@ def _generate_catenaries(
                 "pole_indices": [],
             },
         )
-        cs_data["t1_intersections"].extend(
-            intersection_info["t1_intersections"]
-        )
-        cs_data["t2_intersections"].extend(
-            intersection_info["t2_intersections"]
-        )
+        cs_data["t1_intersections"].extend(intersection_info["t1_intersections"])
+        cs_data["t2_intersections"].extend(intersection_info["t2_intersections"])
         cs_data["pole_indices"].extend(
             s + pi for pi in intersection_info["pole_indices"]
         )
 
-        # Propagate offset to the next adjacent section: the offset is
-        # the distance from the last generated pole to the end of this
-        # sub-path, so the next section continues the spacing.
         local_poles = intersection_info["pole_indices"]
         if local_poles:
             last_local = max(local_poles)
@@ -457,9 +428,6 @@ def _generate_wires(
     curve,
     min_y_lut=None,
 ):
-    # ------------------------------------------------------------------
-    # Build a lookup: for each cross-section, does a catenary exist?
-    # ------------------------------------------------------------------
     cs_has_catenary = set(catenary_intersection_data.keys())
 
     for struct in structures:
@@ -510,10 +478,6 @@ def _generate_wires(
             t1_int_global = [unique_poles[pi][0] for pi in pole_idx_global]
             t2_int_global = [unique_poles[pi][1] for pi in pole_idx_global]
 
-        # --------------------------------------------------------------
-        # Determine which end of the wire's span has a catenary and
-        # which doesn't, so we can extend / trim correctly.
-        # --------------------------------------------------------------
         wire_point_pairs = struct.get("point_pairs")
         wire_ranges = (
             _determine_index_pairs(path, wire_point_pairs) if wire_point_pairs else None
@@ -521,7 +485,6 @@ def _generate_wires(
         if wire_ranges is None:
             wire_ranges = default_mask_ranges
 
-        # Overall span covered by this wire
         if wire_ranges:
             wire_start_idx = min(s for s, _ in wire_ranges)
             wire_end_idx = max(e for _, e in wire_ranges)
@@ -529,12 +492,13 @@ def _generate_wires(
             wire_start_idx = 0
             wire_end_idx = len(path) - 1
 
-        # Check if the first / last cross-section in this wire has catenary
-        has_cat_at_start = active_cs_names[0] in cs_has_catenary if active_cs_names else False
-        has_cat_at_end = active_cs_names[-1] in cs_has_catenary if active_cs_names else False
+        has_cat_at_start = (
+            active_cs_names[0] in cs_has_catenary if active_cs_names else False
+        )
+        has_cat_at_end = (
+            active_cs_names[-1] in cs_has_catenary if active_cs_names else False
+        )
 
-        # For adjacent catenary sections sharing a boundary, deduplicate
-        # poles that appear at the same index (both sections generated one)
         if pole_idx_global:
             deduped = {}
             for pi, t1, t2 in zip(pole_idx_global, t1_int_global, t2_int_global):
@@ -544,15 +508,6 @@ def _generate_wires(
             t1_int_global = [deduped[pi][0] for pi in pole_idx_global]
             t2_int_global = [deduped[pi][1] for pi in pole_idx_global]
 
-        # --------------------------------------------------------------
-        # Wire extension logic — the wire draws between ALL poles.
-        # We never remove poles from the list.
-        #
-        # The only extension needed is at the end: if the last cross
-        # section has no catenary, the wire extends from the last pole
-        # to the path end.  The end-anchor uses the last intersection
-        # so the wire stays on the track, not the center line.
-        # --------------------------------------------------------------
         t1_path_end = None
         t2_path_end = None
         path_end_index = None
@@ -589,7 +544,6 @@ def _generate_wires(
             track_rail_coords_global = {
                 c for c in track_rail_coords_global if (c[0], c[2]) in wire_silhouette
             }
-
 
         if not pole_idx_global and not track_rail_coords_global:
             continue
@@ -699,6 +653,7 @@ def assemble_advance_curve(
 
     catenary_positions, catenary_intersection_data = _generate_catenaries(
         path,
+        tangents,
         structures,
         cross_sections,
         cross_sections_index_pairs,
@@ -740,7 +695,8 @@ def assemble_advance_curve(
     if min_y_lut and result:
         for block in list(result.keys()):
             filtered = [
-                pos for pos in result[block]
+                pos
+                for pos in result[block]
                 if min_y_lut.get((pos[0], pos[2])) is None
                 or pos[1] >= min_y_lut[(pos[0], pos[2])]
             ]
