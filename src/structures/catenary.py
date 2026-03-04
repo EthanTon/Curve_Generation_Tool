@@ -52,7 +52,10 @@ def assemble(
     catenary_cross_section: list,
     catenary_interval: int,
     offset=0,
+    min_y_lut=None,
+    skip_trailing_pole=False,
 ):
+
     base = determine_base(path, base_width, path_silhouette)
 
     tracks_data, center_points, tangent_angles, valid_pole_indices = generate_catenary(
@@ -91,10 +94,11 @@ def assemble(
 
     last_path_idx = len(path) - 1
 
-    if not p_indices or p_indices[-1] < last_path_idx:
-        base_edge = determine_base_edge(path, base_width // 2 - 1, base)
+    if not skip_trailing_pole and (not p_indices or p_indices[-1] < last_path_idx):
+        base_edge = determine_base_edge(path, base_width // 2 - 1, base, track_width=track_width)
+        all_tracks = set(track1) | set(track2)
         pole_a, pole_b = determine_catenary_pole_position(
-            path, last_path_idx, base_width, base_edge
+            path, last_path_idx, base_width, base_edge, track_positions=all_tracks
         )
 
         if pole_a and pole_b:
@@ -114,17 +118,33 @@ def assemble(
         "pole_indices": p_indices,
     }
 
+    # Apply minimum y level filter
+    if min_y_lut and curve:
+        for block in list(curve.keys()):
+            filtered = set()
+            for pos in curve[block]:
+                x, y, z = pos
+                min_y = min_y_lut.get((x, z))
+                if min_y is not None and y < min_y:
+                    continue
+                filtered.add(pos)
+            if filtered:
+                curve[block] = filtered
+            else:
+                del curve[block]
+
     return curve, intersection_info
 
 
 def generate_catenary(
     path, track1, track2, base, base_width, track_width, catenary_interval, offset=0
 ):
-    base_edge = determine_base_edge(path, base_width // 2 - 1, base)
+    base_edge = determine_base_edge(path, base_width // 2 - 1, base, track_width=track_width)
     cantilever_length = base_width // 2 - track_width // 2 + 1
 
     tc1 = set(track1)
     tc2 = set(track2)
+    all_tracks = tc1 | tc2
 
     pole_indices = determine_catenary_indices(path, catenary_interval, offset)
 
@@ -142,7 +162,7 @@ def generate_catenary(
 
     for idx in pole_indices:
         pole_a, pole_b = determine_catenary_pole_position(
-            path, idx, base_width, base_edge
+            path, idx, base_width, base_edge, track_positions=all_tracks
         )
         if pole_a is None or pole_b is None:
             continue
@@ -228,28 +248,51 @@ def determine_catenary_indices(path, catenary_interval, offset):
 def determine_valid_midpoint(
     path, catenary_indices, bound, current_idx, max_iterations=4
 ):
+    """Generate up to max_iterations equally-spaced poles between the last
+    accepted index and *current_idx*.  Each candidate is checked for
+    line-of-sight to the previous accepted point; as soon as one fails
+    the remaining candidates are skipped so we never leave a gap."""
     last_idx = catenary_indices[-1]
-    prev_x, prev_y = path[last_idx]
-    low, high = last_idx, current_idx
+    span = current_idx - last_idx
+    if span <= 0:
+        catenary_indices.append(current_idx)
+        return
+
+    # Build up to max_iterations equally-spaced candidate indices
+    n_poles = min(max_iterations, span)
+    candidates = []
+    for k in range(1, n_poles + 1):
+        idx = last_idx + round(k * span / (n_poles + 1))
+        idx = max(last_idx + 1, min(idx, current_idx - 1))
+        if not candidates or idx > candidates[-1]:
+            candidates.append(idx)
+
     added = 0
-
-    for _ in range(max_iterations):
-        mid = (low + high) // 2
-        mid_x, mid_y = path[mid]
-
+    prev_x, prev_y = path[last_idx]
+    for idx in candidates:
+        mid_x, mid_y = path[idx]
         if line_leaves_bound(step_line(mid_x, mid_y, prev_x, prev_y), bound):
-            high = mid
-        else:
-            catenary_indices.append(mid)
-            added += 1
-            prev_x, prev_y = mid_x, mid_y
-            low = mid
+            break
+        catenary_indices.append(idx)
+        added += 1
+        prev_x, prev_y = mid_x, mid_y
 
     if added == 0:
         catenary_indices.append(current_idx)
 
 
-def determine_catenary_pole_position(path, index, base_width, base_edge):
+def determine_catenary_pole_position(path, index, base_width, base_edge, track_positions=None):
+    """Determine two pole positions on opposite edges of the base, orthogonal
+    to the path at *index*.
+
+    *track_positions* is an optional set of (x, z) coordinates that belong to
+    the track area.  When provided, any candidate that lands inside the track
+    is rejected so that poles always sit on the true outer edge.
+
+    The search always runs: even if the initial normal-projected point is in
+    base_edge, we verify it isn't overlapping the track and pick the best
+    candidate from the search area.
+    """
     sigma = 1.0
     xp, yp = path[index]
     scalar = base_width // 2
@@ -258,35 +301,40 @@ def determine_catenary_pole_position(path, index, base_width, base_edge):
     vector1 = (round(normal[0] * scalar + xp), round(normal[1] * scalar + yp))
     vector2 = (round(-normal[0] * scalar + xp), round(-normal[1] * scalar + yp))
 
-    # Snap vector1 to base_edge
-    if vector1 not in base_edge:
-        best = None
-        best_dist = float("inf")
-        for pt in bresenham_filled_circle(vector1[0], vector1[1], 2):
-            if pt in base_edge:
-                d = (pt[0] - vector1[0]) ** 2 + (pt[1] - vector1[1]) ** 2
-                if d < best_dist:
-                    best_dist = d
-                    best = pt
-        if best is not None:
-            vector1 = best
-        else:
-            return (None, None)
+    snap_radius = max(3, base_width // 4)
 
-    # Snap vector2 to base_edge
-    if vector2 not in base_edge:
+    def _snap_to_edge(vec):
+        """Search for the best base_edge point near *vec* that is not on a
+        track.  Always runs the full search — never short-circuits — so that
+        we guarantee the result is on the true outer edge even when the
+        initial projection looks valid.
+
+        Among candidates, prefer the one closest to *vec* (stays on the
+        normal).  Ties broken by distance from path center (farther = more
+        outer = better)."""
         best = None
         best_dist = float("inf")
-        for pt in bresenham_filled_circle(vector2[0], vector2[1], 2):
-            if pt in base_edge:
-                d = (pt[0] - vector2[0]) ** 2 + (pt[1] - vector2[1]) ** 2
-                if d < best_dist:
-                    best_dist = d
-                    best = pt
-        if best is not None:
-            vector2 = best
-        else:
-            return (None, None)
+        best_center_dist = -1
+        for pt in bresenham_filled_circle(vec[0], vec[1], snap_radius):
+            if pt not in base_edge:
+                continue
+            if track_positions and pt in track_positions:
+                continue
+            d = (pt[0] - vec[0]) ** 2 + (pt[1] - vec[1]) ** 2
+            cd = (pt[0] - xp) ** 2 + (pt[1] - yp) ** 2
+            if d < best_dist or (d == best_dist and cd > best_center_dist):
+                best_dist = d
+                best_center_dist = cd
+                best = pt
+        return best
+
+    vector1 = _snap_to_edge(vector1)
+    if vector1 is None:
+        return (None, None)
+
+    vector2 = _snap_to_edge(vector2)
+    if vector2 is None:
+        return (None, None)
 
     return (vector1, vector2)
 
@@ -338,7 +386,7 @@ def determine_base(path, width, silhouette):
     return base.intersection(silhouette)
 
 
-def determine_base_edge(path, width, base):
+def determine_base_edge(path, width, base, track_width=None):
     edge = set()
     for x, y in base:
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -346,7 +394,15 @@ def determine_base_edge(path, width, base):
                 edge.add((x, y))
                 break
 
+    # Use track_width to determine the exclusion radius so poles never
+    # land inside the track area.  Fall back to the old (narrow) radius
+    # when track_width is not provided for backward compatibility.
+    if track_width is not None:
+        filter_radius = track_width // 2 + 1
+    else:
+        filter_radius = width // 2 - 1
+
     filter_set = set()
     for x, y in path:
-        filter_set.update(bresenham_filled_circle(int(x), int(y), width // 2 - 1))
+        filter_set.update(bresenham_filled_circle(int(x), int(y), filter_radius))
     return edge - filter_set

@@ -42,16 +42,6 @@ def _draw_lines(points, elevation_lut, use_step_line):
     return result
 
 
-def _filter_intersections(intersections, pole_indices, active_ranges):
-    kept = []
-    for pt, pi in zip(intersections, pole_indices):
-        for s, e in active_ranges:
-            if s <= pi <= e:
-                kept.append(pt)
-                break
-    return kept
-
-
 def _stamp_cross_section(base_points, wire_cross_section):
     blocks = {}
     for bx, by, bz in base_points:
@@ -68,23 +58,36 @@ def assemble(
     t1_intersections=None,
     t2_intersections=None,
     pole_indices=None,
-    mask_ranges=None,
+    mask_ranges=None,  # Kept in signature to prevent breaking external calls
     track_rail_coords=None,
     use_step_line=True,
     resolve_blocks=True,
     override_catenary=False,
     catenary_positions=None,
+    t1_path_start=None,
+    t2_path_start=None,
+    path_start_index=None,
     t1_path_end=None,
     t2_path_end=None,
     path_end_index=None,
+    min_y_lut=None,
 ):
-    has_poles = t1_intersections and t2_intersections and pole_indices
-    can_extend = t1_path_end and t2_path_end
+    has_poles = bool(t1_intersections and t2_intersections and pole_indices)
+    can_prepend = bool(t1_path_start and t2_path_start)
+    can_extend = bool(t1_path_end and t2_path_end)
 
-    if has_poles:
+    base_points = []
+
+    if has_poles and len(t1_intersections) >= 2:
         t1_pts = list(t1_intersections)
         t2_pts = list(t2_intersections)
         p_indices = list(pole_indices)
+
+        if can_prepend:
+            t1_pts.insert(0, t1_path_start)
+            t2_pts.insert(0, t2_path_start)
+            idx = path_start_index if path_start_index is not None else max(0, p_indices[0] - 1)
+            p_indices.insert(0, idx)
 
         if can_extend:
             t1_pts.append(t1_path_end)
@@ -92,22 +95,13 @@ def assemble(
             idx = path_end_index if path_end_index is not None else (p_indices[-1] + 1)
             p_indices.append(idx)
 
-        if mask_ranges is not None:
-            t1_filtered = _filter_intersections(t1_pts, p_indices, mask_ranges)
-            t2_filtered = _filter_intersections(t2_pts, p_indices, mask_ranges)
-        else:
-            t1_filtered, t2_filtered = t1_pts, t2_pts
-
-        base_points = []
-        if len(t1_filtered) >= 2:
-            base_points.extend(_draw_lines(t1_filtered, elevation_lut, use_step_line))
-        if len(t2_filtered) >= 2:
-            base_points.extend(_draw_lines(t2_filtered, elevation_lut, use_step_line))
+        # Draw lines continuously across all valid poles, skipping the mask filter
+        base_points.extend(_draw_lines(t1_pts, elevation_lut, use_step_line))
+        base_points.extend(_draw_lines(t2_pts, elevation_lut, use_step_line))
 
     elif track_rail_coords:
-        base_points = list(track_rail_coords)
-    else:
-        return {}
+        # Fallback to drawing over the line/tracks if no intersections exist
+        base_points.extend(list(track_rail_coords))
 
     if not base_points:
         return {}
@@ -123,6 +117,21 @@ def assemble(
         for block in list(blocks.keys()):
             blocks[block] -= catenary_positions
             if not blocks[block]:
+                del blocks[block]
+
+    # Apply minimum y level filter
+    if min_y_lut and blocks:
+        for block in list(blocks.keys()):
+            filtered = set()
+            for pos in blocks[block]:
+                x, y, z = pos
+                min_y = min_y_lut.get((x, z))
+                if min_y is not None and y < min_y:
+                    continue
+                filtered.add(pos)
+            if filtered:
+                blocks[block] = filtered
+            else:
                 del blocks[block]
 
     return blocks
