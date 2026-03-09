@@ -6,7 +6,6 @@ from util.CoreUtil.elevationUtil import generate_elevation_lookup
 from util.CoreUtil.pathUtil import optimal_tangent_window, center_path_tangents
 from util.CoreUtil.crossSectionUtil import flip_cross_section, precompute_sections
 from util.CoreUtil.maskingUtil import mask
-from util.CoreUtil.shapeUtil import bresenham_line
 
 from curveAssembly import (
     _norm,
@@ -14,21 +13,33 @@ from curveAssembly import (
     _calculate_backtrack_dist,
 )
 
-from structures.pillar import assemble as assemble_pillars
-from structures.catenary import assemble as assemble_catenary
-from structures.wire import assemble as assemble_wire
+from structures.assembleStructure import assemble_structures
 
 
 def _get_index_from_point(path, point):
-    return path.index(point)
+    pt = (int(point[0]), int(point[1]))
+    try:
+        return path.index(pt)
+    except ValueError:
+        best_idx = 0
+        best_dist = float("inf")
+        px, pz = pt
+        for i, (x, z) in enumerate(path):
+            d = (x - px) ** 2 + (z - pz) ** 2
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        return best_idx
 
 
 def _determine_index_pairs(path, cross_section_points):
     index_pairs = []
     for pt1, pt2 in cross_section_points:
-        index_pairs.append(
-            (_get_index_from_point(path, pt1), _get_index_from_point(path, pt2))
-        )
+        i1 = _get_index_from_point(path, pt1)
+        i2 = _get_index_from_point(path, pt2)
+        if i1 > i2:
+            i1, i2 = i2, i1
+        index_pairs.append((i1, i2))
     return index_pairs
 
 
@@ -238,12 +249,6 @@ def _merge_curve_halves(curve_halves):
     return merged
 
 
-def _structures_for_cs(structures, cs_name, struct_type):
-    for s in structures:
-        if s.get("type") == struct_type and cs_name in s.get("cross_sections", []):
-            yield s
-
-
 def _cs_needs_symmetry(structures, cs_name):
     for s in structures:
         if cs_name not in s.get("cross_sections", []):
@@ -251,327 +256,6 @@ def _cs_needs_symmetry(structures, cs_name):
         if s.get("type") in ("catenary", "wire"):
             return True
     return False
-
-
-def _generate_pillars(
-    path,
-    tangents,
-    elev_lut,
-    structures,
-    cross_sections,
-    cross_sections_index_pairs,
-    cross_section_silhouettes,
-    curve,
-):
-    pillar_coords = {}
-
-    for cs_name in cross_sections:
-        index_ranges = cross_sections_index_pairs[cs_name]
-        cs_mask = cross_section_silhouettes.get(cs_name, set())
-
-        for struct in _structures_for_cs(structures, cs_name, "pillar"):
-            for s, e in index_ranges:
-                e = min(e, len(path) - 1)
-                if s > e:
-                    continue
-                sub_path = path[s : e + 1]
-                sub_tangents = tangents[s : e + 1]
-
-                result, _ = assemble_pillars(
-                    path=sub_path,
-                    tangents=sub_tangents,
-                    elev_lut=elev_lut,
-                    pillar_sections=struct["pillar_sections"],
-                    pillar_distance=struct["distance"],
-                    mask=cs_mask,
-                )
-
-                for block, pts in result.items():
-                    for coord in pts:
-                        pillar_coords[coord] = block
-
-    # Purge pillar coordinates from existing curve blocks
-    for coord in pillar_coords:
-        for existing_pts in curve.values():
-            existing_pts.discard(coord)
-
-    # Merge pillar blocks into curve
-    for coord, block in pillar_coords.items():
-        curve.setdefault(block, set()).add(coord)
-
-
-def _generate_catenaries(
-    path,
-    tangents,
-    structures,
-    cross_sections,
-    cross_sections_index_pairs,
-    cross_section_silhouettes,
-    elev_lut,
-    curve_halves,
-    curve,
-    min_y_lut=None,
-):
-    catenary_positions = set()
-    catenary_intersection_data = {}
-
-    catenary_entries = []
-    for cs_name in cross_sections:
-        halves = curve_halves.get(cs_name, [])
-        if len(halves) < 2:
-            continue
-        for struct in _structures_for_cs(structures, cs_name, "catenary"):
-            for s, e in cross_sections_index_pairs[cs_name]:
-                e = min(e, len(path) - 1)
-                if s <= e:
-                    catenary_entries.append((cs_name, struct, s, e))
-
-    catenary_entries.sort(key=lambda x: x[2])
-
-    has_successor = set()
-    has_predecessor = set()
-    for i in range(len(catenary_entries)):
-        for j in range(len(catenary_entries)):
-            if i == j:
-                continue
-            if catenary_entries[i][3] == catenary_entries[j][2]:
-                has_successor.add(i)
-                has_predecessor.add(j)
-
-    boundary_offsets = {}
-
-    for entry_idx, (cs_name, struct, s, e) in enumerate(catenary_entries):
-        halves = curve_halves.get(cs_name, [])
-        cs_mask = cross_section_silhouettes.get(cs_name, set())
-
-        catenary_sections = struct.get("catenary_sections")
-        if not catenary_sections:
-            continue
-
-        track1 = set()
-        track2 = set()
-        for block, pts in halves[0].items():
-            if is_rail_block(block):
-                for coord in pts:
-                    track1.add((coord[0], coord[2]))
-        for block, pts in halves[1].items():
-            if is_rail_block(block):
-                for coord in pts:
-                    track2.add((coord[0], coord[2]))
-
-        if entry_idx in has_predecessor and s in boundary_offsets:
-            effective_offset = boundary_offsets[s]
-        else:
-            effective_offset = struct.get("offset", 0)
-
-        skip_trailing = entry_idx in has_successor
-
-        sub_path = path[s : e + 1]
-        sub_tangents = tangents[s : e + 1]
-
-        result, _, intersection_info = assemble_catenary(
-            path=sub_path,
-            tangents=sub_tangents,
-            elev_lut=elev_lut,
-            track1=track1,
-            track2=track2,
-            track_width=struct["track_width"],
-            catenary_sections=catenary_sections,
-            catenary_interval=struct["catenary_interval"],
-            offset=effective_offset,
-            min_y_lut=min_y_lut,
-            skip_trailing_pole=skip_trailing,
-        )
-
-        for block, pts in result.items():
-            for existing_block in list(curve.keys()):
-                if existing_block != block:
-                    curve[existing_block].difference_update(pts)
-                    if not curve[existing_block]:
-                        del curve[existing_block]
-            curve.setdefault(block, set()).update(pts)
-            catenary_positions.update(pts)
-
-        cs_data = catenary_intersection_data.setdefault(
-            cs_name,
-            {
-                "t1_intersections": [],
-                "t2_intersections": [],
-                "pole_indices": [],
-            },
-        )
-        cs_data["t1_intersections"].extend(intersection_info["t1_intersections"])
-        cs_data["t2_intersections"].extend(intersection_info["t2_intersections"])
-        cs_data["pole_indices"].extend(
-            s + pi for pi in intersection_info["pole_indices"]
-        )
-
-        local_poles = intersection_info["pole_indices"]
-        if local_poles:
-            last_local = max(local_poles)
-            remaining = (e - s) - last_local
-            boundary_offsets[e] = remaining
-
-    return catenary_positions, catenary_intersection_data
-
-
-def _generate_wires(
-    path,
-    structures,
-    cross_sections,
-    cross_sections_index_pairs,
-    cross_section_silhouettes,
-    elev_lut,
-    curve_halves,
-    catenary_positions,
-    catenary_intersection_data,
-    curve,
-    min_y_lut=None,
-):
-    cs_has_catenary = set(catenary_intersection_data.keys())
-
-    for struct in structures:
-        if struct.get("type") != "wire":
-            continue
-
-        wire_cross_section = struct.get("wire_cross_section")
-        if not wire_cross_section:
-            continue
-
-        active_cs_names = struct.get("cross_sections", [])
-        if not active_cs_names:
-            continue
-
-        t1_int_global = []
-        t2_int_global = []
-        pole_idx_global = []
-        track_rail_coords_global = set()
-        cs_sil_global = set()
-        default_mask_ranges = []
-
-        for cs_name in active_cs_names:
-            if cs_name not in cross_sections:
-                continue
-
-            cs_int = catenary_intersection_data.get(cs_name)
-            if cs_int:
-                t1_int_global.extend(cs_int["t1_intersections"])
-                t2_int_global.extend(cs_int["t2_intersections"])
-                pole_idx_global.extend(cs_int["pole_indices"])
-
-            halves = curve_halves.get(cs_name, [])
-            for half in halves:
-                for block, pts in half.items():
-                    if is_rail_block(block):
-                        track_rail_coords_global.update(pts)
-
-            cs_sil_global.update(cross_section_silhouettes.get(cs_name, set()))
-            default_mask_ranges.extend(cross_sections_index_pairs.get(cs_name, []))
-
-        if pole_idx_global:
-            unique_poles = {}
-            for t1, t2, pi in zip(t1_int_global, t2_int_global, pole_idx_global):
-                if pi not in unique_poles:
-                    unique_poles[pi] = (t1, t2)
-
-            pole_idx_global = sorted(unique_poles.keys())
-            t1_int_global = [unique_poles[pi][0] for pi in pole_idx_global]
-            t2_int_global = [unique_poles[pi][1] for pi in pole_idx_global]
-
-        wire_point_pairs = struct.get("point_pairs")
-        wire_ranges = (
-            _determine_index_pairs(path, wire_point_pairs) if wire_point_pairs else None
-        )
-        if wire_ranges is None:
-            wire_ranges = default_mask_ranges
-
-        if wire_ranges:
-            wire_start_idx = min(s for s, _ in wire_ranges)
-            wire_end_idx = max(e for _, e in wire_ranges)
-        else:
-            wire_start_idx = 0
-            wire_end_idx = len(path) - 1
-
-        has_cat_at_start = (
-            active_cs_names[0] in cs_has_catenary if active_cs_names else False
-        )
-        has_cat_at_end = (
-            active_cs_names[-1] in cs_has_catenary if active_cs_names else False
-        )
-
-        if pole_idx_global:
-            deduped = {}
-            for pi, t1, t2 in zip(pole_idx_global, t1_int_global, t2_int_global):
-                if pi not in deduped:
-                    deduped[pi] = (t1, t2)
-            pole_idx_global = sorted(deduped.keys())
-            t1_int_global = [deduped[pi][0] for pi in pole_idx_global]
-            t2_int_global = [deduped[pi][1] for pi in pole_idx_global]
-
-        t1_path_end = None
-        t2_path_end = None
-        path_end_index = None
-
-        if pole_idx_global and len(t1_int_global) >= 2:
-            if not has_cat_at_end:
-                t1_path_end = t1_int_global[-1]
-                t2_path_end = t2_int_global[-1]
-                path_end_index = wire_end_idx
-
-        raw_mask_pairs = struct.get("mask_point_pairs")
-        mask_ranges = None
-        if raw_mask_pairs:
-            mask_ranges = _determine_index_pairs(path, raw_mask_pairs)
-        else:
-            mask_ranges = default_mask_ranges
-
-        if (
-            (not pole_idx_global or len(t1_int_global) < 2)
-            and mask_ranges
-            and track_rail_coords_global
-        ):
-            wire_silhouette = set()
-            max_width = max(
-                [
-                    cross_sections[cs]["width"]
-                    for cs in active_cs_names
-                    if cs in cross_sections
-                ]
-                + [0]
-            )
-            for ms, me in mask_ranges:
-                wire_silhouette |= mask(path, ms, me, max_width, cs_sil_global)
-            track_rail_coords_global = {
-                c for c in track_rail_coords_global if (c[0], c[2]) in wire_silhouette
-            }
-
-        if not pole_idx_global and not track_rail_coords_global:
-            continue
-
-        result = assemble_wire(
-            wire_cross_section=wire_cross_section,
-            elevation_lut=elev_lut,
-            t1_intersections=t1_int_global if t1_int_global else None,
-            t2_intersections=t2_int_global if t2_int_global else None,
-            pole_indices=pole_idx_global if pole_idx_global else None,
-            mask_ranges=mask_ranges,
-            track_rail_coords=(
-                track_rail_coords_global
-                if (not pole_idx_global or len(t1_int_global) < 2)
-                else None
-            ),
-            use_step_line=struct.get("use_step_line", True),
-            resolve_blocks=struct.get("resolve_blocks", True),
-            override_catenary=struct.get("override_catenary", False),
-            catenary_positions=catenary_positions,
-            t1_path_end=t1_path_end,
-            t2_path_end=t2_path_end,
-            path_end_index=path_end_index,
-            min_y_lut=min_y_lut,
-        )
-
-        for block, pts in result.items():
-            curve.setdefault(block, set()).update(pts)
 
 
 def assemble_advance_curve(
@@ -651,42 +335,31 @@ def assemble_advance_curve(
 
     curve = _merge_curve_halves(curve_halves)
 
-    catenary_positions, catenary_intersection_data = _generate_catenaries(
-        path,
-        tangents,
-        structures,
-        cross_sections,
-        cross_sections_index_pairs,
-        cross_section_silhouettes,
-        elev_lut,
-        curve_halves,
-        curve,
-        min_y_lut=min_y_lut,
-    )
+    # Remap index pairs from extended-path indices to raw_path indices
+    raw_index_pairs = {}
+    for cs_name, pairs in cross_sections_index_pairs.items():
+        remapped = []
+        for s, e in pairs:
+            s2 = max(0, s - raw_start)
+            e2 = min(len(raw_path) - 1, e - raw_start)
+            if s2 <= e2:
+                remapped.append((s2, e2))
+        raw_index_pairs[cs_name] = remapped
 
-    _generate_wires(
-        path,
-        structures,
-        cross_sections,
-        cross_sections_index_pairs,
-        cross_section_silhouettes,
-        elev_lut,
-        curve_halves,
-        catenary_positions,
-        catenary_intersection_data,
-        curve,
-        min_y_lut=min_y_lut,
-    )
+    # Slice tangents to match raw_path
+    raw_tangents = tangents[raw_start:raw_end]
 
-    _generate_pillars(
-        path,
-        tangents,
-        elev_lut,
-        structures,
-        cross_sections,
-        cross_sections_index_pairs,
-        cross_section_silhouettes,
-        curve,
+    assemble_structures(
+        path=raw_path,
+        tangents=raw_tangents,
+        elev_lut=elev_lut,
+        structures=structures,
+        cross_sections=cross_sections,
+        cross_sections_index_pairs=raw_index_pairs,
+        cross_section_silhouettes=cross_section_silhouettes,
+        curve_halves=curve_halves,
+        curve=curve,
+        min_y_lut=min_y_lut,
     )
 
     result = {block: list(pts) for block, pts in curve.items() if pts}
@@ -708,11 +381,13 @@ def assemble_advance_curve(
     if resolve_rails:
         from util.CoreUtil.blockUtil import resolve_rail_shapes
 
-        rail_groups = [
-            rc for cs_halves in all_halves.values() for _, _, rc in cs_halves if rc
-        ]
-        if rail_groups:
-            result = resolve_rail_shapes(result, rail_groups)
+        all_rail_coords = set()
+        for cs_halves in all_halves.values():
+            for _, _, rc in cs_halves:
+                if rc:
+                    all_rail_coords.update(rc)
+        if all_rail_coords:
+            result = resolve_rail_shapes(result, [all_rail_coords])
 
     cp0_xz = raw_path[0]
     cp0_y = elev_lut.get(cp0_xz, 0)

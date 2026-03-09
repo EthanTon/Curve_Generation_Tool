@@ -59,18 +59,21 @@ Expected JSON — advance (multi cross-section + structures):
             "0": "catenary_0.schem",
             "22.5": "catenary_22.schem",
             "45": "catenary_45.schem",
-            "catenary_interval": 20,
+            "distance": 20,
             "track_width": 5,
             "offset": 0
         },
         {
             "type": "wire",
             "cross_sections": ["main", "bridge"],
-            "schematic": "wire.schem",
-            "points": [[[0, 0], [750, 500]]],
-            "use_step_line": true,
-            "resolve_blocks": true,
-            "override_catenary": false
+            "track_width": 5,
+            "wires": [
+                {
+                    "schematic": "wire.schem",
+                    "use_step_line": true,
+                    "use_lines": true
+                }
+            ]
         }
     ]
 }
@@ -89,31 +92,30 @@ Pillar structures supply three schematics keyed by base angle ("0", "22.5",
 "45").  All 16 orientations (0° through 337.5° in 22.5° steps) are derived
 from these three via 90° rotation and mirroring.
 
-Catenary structures supply an ordered list of schematics ("schematics") where
-each file is a vertical cross-section slice.  Index 0 is at the pole (road
-edge) and the last index is at the track intersection (near centre).  The
-number of slices must equal the cantilever length
-(base_width // 2 - track_width // 2 + 1).  "base_width" sets the distance
-between poles across the path and "track_width" is the width of each track
-half.  Each slice is defined as left at 0 degrees and facing centre; track-2
-(right side) slices are automatically mirrored.
+Catenary structures supply three schematics keyed by base angle ("0",
+"22.5", "45").  All 16 orientations (0° through 337.5° in 22.5° steps)
+are derived from these three via 90° rotation and mirroring.  "distance"
+sets the interval between poles along the path.  "track_width" is the
+width of each track half.  Each slice is defined as left at 0 degrees and
+facing centre; track-2 (right side) slices are automatically mirrored.
+"override" (default true) controls whether catenary blocks replace
+existing curve blocks at the same coordinates; set to false to merge
+catenary blocks without purging the originals.
 
-Wire structures supply a single schematic ("schematic") whose cross-section
-is stamped along the wire path.  Wires use catenary intersection points as
-their generation base — lines are drawn between consecutive intersection
-points on each track.  The optional "points" field is a list of point-pairs
-(same format as cross-section points) that act as a mask: only catenary
-intersections whose pole position falls within the masked path segments are
-used.  When "points" is omitted the wire generates across the full
-cross-section coverage.  When no catenary data exists for the referenced
-cross-section, the wire falls back to stamping directly on rail block
-positions.  Additional wire options:
-    "use_step_line": true/false (default true)  — true for axis-aligned
+Wire structures declare a "wires" list where each entry contains a
+"schematic" whose cross-section is stamped along the wire path.
+"track_width" (required at the structure level) sets the gauge used for
+perpendicular intersection searches.  When "use_lines" is true (the
+default), straight lines are drawn between consecutive catenary pole
+intersection points on each track; path segments before the first pole
+and after the last pole fall back to following the track geometry.  When
+"use_lines" is false (or fewer than two poles exist), the entire wire
+follows the track geometry.  Per-wire options:
+    "schematic": path to the wire cross-section schematic (required).
+    "use_step_line": true/false (default true) — true for axis-aligned
         stepping (step_line), false for diagonal Bresenham (bresenham_line).
-    "resolve_blocks": true/false (default true) — auto-resolve block
-        connectivity (e.g. rail shapes) so connected blocks match.
-    "override_catenary": true/false (default false) — when false, wire
-        blocks that overlap catenary positions are removed.
+    "use_lines": true/false (default true) — true to draw straight lines
+        between pole intersections, false to follow tracks entirely.
 """
 
 import argparse
@@ -243,60 +245,72 @@ def _load_structure(cfg, json_dir):
         }
 
     if cfg.get("type") == "catenary":
-            if "track_width" not in cfg:
-                raise ValueError(
-                    "Catenary structure requires 'track_width' (width of each track)."
-                )
-            if "catenary_interval" not in cfg:
-                raise ValueError(
-                    "Catenary structure requires 'catenary_interval' (distance between poles)."
-                )
-                
-            catenary_sections = {}
-            for angle in _PILLAR_ANGLE_KEYS:
-                str_key = str(angle)
-                if str_key not in cfg:
-                    str_key = str(int(angle)) if angle == int(angle) else str(angle)
-                if str_key not in cfg:
-                    raise ValueError(
-                        f"Catenary structure missing required schematic for angle {angle}."
-                    )
-                schem_path = _resolve_path(json_dir, cfg.pop(str_key))
-                catenary_sections[angle] = _load_cross_section(schem_path)
+        if "track_width" not in cfg:
+            raise ValueError(
+                "Catenary structure requires 'track_width' (width of each track)."
+            )
+        if "distance" not in cfg:
+            raise ValueError(
+                "Catenary structure requires 'distance' (interval between poles)."
+            )
 
-            return {
-                "type": "catenary",
-                "cross_sections": cs_names,
-                "catenary_sections": catenary_sections,
-                "catenary_interval": cfg["catenary_interval"],
-                "track_width": cfg["track_width"],
-                "offset": cfg.get("offset", 0),
-            }
+        catenary_sections = {}
+        for angle in _PILLAR_ANGLE_KEYS:
+            str_key = str(angle)
+            if str_key not in cfg:
+                str_key = str(int(angle)) if angle == int(angle) else str(angle)
+            if str_key not in cfg:
+                raise ValueError(
+                    f"Catenary structure missing required schematic for angle {angle}."
+                )
+            schem_path = _resolve_path(json_dir, cfg.pop(str_key))
+            catenary_sections[angle] = _load_cross_section(schem_path)
+
+        return {
+            "type": "catenary",
+            "cross_sections": cs_names,
+            "catenaries": {name: catenary_sections for name in cs_names},
+            "distance": cfg["distance"],
+            "track_width": cfg["track_width"],
+            "offset": cfg.get("offset", 0),
+            "override": cfg.get("override", True),
+        }
 
     if cfg.get("type") == "wire":
-        if "schematic" not in cfg:
+        if "track_width" not in cfg:
             raise ValueError(
-                "Wire structure requires a 'schematic' for the wire cross-section."
+                "Wire structure requires 'track_width' (width of each track)."
             )
-        schem_path = _resolve_path(json_dir, cfg["schematic"])
-        wire_cs = _load_cross_section(
-            schem_path,
-            axis=cfg.get("slice_axis"),
-            level=cfg.get("slice_level"),
-        )
-        # "points" are mask point-pairs (same format as cross-section points)
-        mask_point_pairs = None
-        raw_points = cfg.get("points")
-        if raw_points:
-            mask_point_pairs = [(tuple(pair[0]), tuple(pair[1])) for pair in raw_points]
+        if "wires" not in cfg or not cfg["wires"]:
+            raise ValueError(
+                "Wire structure requires a 'wires' list with at least one entry."
+            )
+
+        loaded_wires = []
+        for wire_entry in cfg["wires"]:
+            if "schematic" not in wire_entry:
+                raise ValueError(
+                    "Each wire entry requires a 'schematic' for the wire cross-section."
+                )
+            schem_path = _resolve_path(json_dir, wire_entry["schematic"])
+            wire_cs = _load_cross_section(
+                schem_path,
+                axis=wire_entry.get("slice_axis"),
+                level=wire_entry.get("slice_level"),
+            )
+            loaded_wires.append(
+                {
+                    "wire_cross_section": wire_cs,
+                    "use_step_line": wire_entry.get("use_step_line", True),
+                    "use_lines": wire_entry.get("use_lines", True),
+                }
+            )
+
         return {
             "type": "wire",
             "cross_sections": cs_names,
-            "wire_cross_section": wire_cs,
-            "mask_point_pairs": mask_point_pairs,
-            "use_step_line": cfg.get("use_step_line", True),
-            "resolve_blocks": cfg.get("resolve_blocks", True),
-            "override_catenary": cfg.get("override_catenary", False),
+            "track_width": cfg["track_width"],
+            "wires": loaded_wires,
         }
 
     # Non-pillar/catenary/wire structures: fall back to single-schematic loading

@@ -1,23 +1,15 @@
 import math
-from util.CoreUtil.shapeUtil import (
-    bresenham_filled_circle,
-    step_line,
-)
+from util.CoreUtil.shapeUtil import bresenham_filled_circle, step_line, bresenham_line
 from util.CoreUtil.blockUtil import rotate_block_state, mirror_block_state
 from curveAssembly import _norm
-from util.CoreUtil.pathUtil import weighted_pca_orthogonal
 
 
-def _stamp(xi, zi, section, elev_lut, coord_map, catenary, min_y_lut=None):
-    use_min_y = min_y_lut is not None
+def _stamp(xi, zi, section, elev_lut, coord_map, catenary):
     intersection_y = elev_lut.get((xi, zi), 0)
     for block, offsets in section.items():
         for rx, ry, rz in offsets:
             wx, wz = _norm(xi + rx), _norm(zi + rz)
             wy = intersection_y + ry
-            if use_min_y:
-                if wy < min_y_lut((wx, wz)):
-                    continue
             coord = (wx, wy, wz)
             if coord in coord_map and coord_map[coord] != block:
                 catenary[coord_map[coord]].discard(coord)
@@ -68,6 +60,7 @@ def _precompute_catenary_sections(catenary_sections):
     return sections
 
 
+# Catenary_lut is a subset of cross_section_lut that only contains cross sections with catenary poles
 def assemble(
     path: list,
     tangents: list,
@@ -75,14 +68,23 @@ def assemble(
     track1: set,
     track2: set,
     track_width: int,
-    catenary_sections: list,
+    catenary_lut: dict,
+    catenaries: dict,
     catenary_interval: int,
     offset=0,
-    min_y_lut=None,
-    skip_trailing_pole=False,
+    covered_indices=None,
 ):
-    sections = _precompute_catenary_sections(catenary_sections)
+    sections = {}
+    for cs_name in catenaries.keys():
+        catenary_sections = catenaries[cs_name]
+        sections[cs_name] = _precompute_catenary_sections(catenary_sections)
+
     catenary_indices = determine_catenary_indices(path, catenary_interval, offset)
+
+    if covered_indices is not None:
+        catenary_indices = [
+            idx for idx in catenary_indices if idx in covered_indices
+        ]
 
     t1_intersections, t2_intersections = determine_intersections(
         path, tangents, track1, track2, track_width, catenary_indices
@@ -92,6 +94,12 @@ def assemble(
     origins = []
 
     for i, idx in enumerate(catenary_indices):
+        x, z = path[idx]
+        cs_name = catenary_lut.get((x, z))
+
+        if cs_name is None:
+            continue
+
         angle = float(tangents[idx])
         coord_map = {}
         stamp_blocks = {}
@@ -117,11 +125,10 @@ def assemble(
             _stamp(
                 point[0],
                 point[1],
-                sections[key],
+                sections[cs_name][key],
                 elev_lut,
                 coord_map,
                 stamp_blocks,
-                min_y_lut,
             )
 
         for block, pts in stamp_blocks.items():
@@ -143,9 +150,11 @@ def assemble(
     return result, path_origin, intersection_info
 
 
-def determine_catenary_indices(path, catenary_interval, offset):
+def determine_catenary_indices(path, catenary_interval, offset=0):
+    if not path or offset >= len(path):
+        return []
     catenary_indices = [offset]
-    bound = set([tuple(pt) for pt in path])
+    bound = determine_bound(path, 2)
 
     reference_x, reference_y = path[offset]
 
@@ -154,15 +163,14 @@ def determine_catenary_indices(path, catenary_interval, offset):
 
         dist = ((x - reference_x) ** 2 + (y - reference_y) ** 2) ** 0.5
 
-        if dist < catenary_interval:
+        if line_leaves_bound(step_line(x, y, reference_x, reference_y), bound):
+            determine_valid_midpoint(path, catenary_indices, bound, i)   
+        elif dist < catenary_interval:
             continue
         else:
-            reference_x, reference_y = x, y
-
-        if line_leaves_bound(step_line(x, y, reference_x, reference_y), bound):
-            determine_valid_midpoint(path, catenary_indices, bound, i)
-        else:
             catenary_indices.append(i)
+
+        reference_x, reference_y = x, y
 
     return catenary_indices
 
@@ -176,7 +184,6 @@ def determine_valid_midpoint(
         catenary_indices.append(current_idx)
         return
 
-    # Build up to max_iterations equally-spaced candidate indices
     n_poles = min(max_iterations, span)
     candidates = []
     for k in range(1, n_poles + 1):
@@ -197,47 +204,6 @@ def determine_valid_midpoint(
 
     if added == 0:
         catenary_indices.append(current_idx)
-
-
-def determine_catenary_pole_position(
-    path, index, base_width, base_edge, track_positions=None
-):
-    sigma = 1.0
-    xp, yp = path[index]
-    scalar = base_width // 2
-
-    normal = weighted_pca_orthogonal(path, index, sigma)
-    vector1 = (round(normal[0] * scalar + xp), round(normal[1] * scalar + yp))
-    vector2 = (round(-normal[0] * scalar + xp), round(-normal[1] * scalar + yp))
-
-    snap_radius = max(3, base_width // 4)
-
-    def _snap_to_edge(vec):
-        best = None
-        best_dist = float("inf")
-        best_center_dist = -1
-        for pt in bresenham_filled_circle(vec[0], vec[1], snap_radius):
-            if pt not in base_edge:
-                continue
-            if track_positions and pt in track_positions:
-                continue
-            d = (pt[0] - vec[0]) ** 2 + (pt[1] - vec[1]) ** 2
-            cd = (pt[0] - xp) ** 2 + (pt[1] - yp) ** 2
-            if d < best_dist or (d == best_dist and cd > best_center_dist):
-                best_dist = d
-                best_center_dist = cd
-                best = pt
-        return best
-
-    vector1 = _snap_to_edge(vector1)
-    if vector1 is None:
-        return (None, None)
-
-    vector2 = _snap_to_edge(vector2)
-    if vector2 is None:
-        return (None, None)
-
-    return (vector1, vector2)
 
 
 def determine_intersections(
