@@ -11,9 +11,10 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar, min_y_lut=N
             wx, wz = _norm(xc + rx), _norm(zc + rz)
             if (wx, wz) not in silhouette:
                 continue
-            wy = elev_lut.get((wx, wz), center_y) + ry
+            wy = center_y + ry
             if use_min_y:
-                if wy < min_y_lut((wx, wz)):
+                min_y = min_y_lut.get((wx, wz))
+                if min_y is not None and wy < min_y:
                     continue
             coord = (wx, wy, wz)
             if coord in coord_map and coord_map[coord] != block:

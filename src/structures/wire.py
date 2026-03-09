@@ -1,5 +1,6 @@
 from util.CoreUtil.shapeUtil import step_line, bresenham_line
 from util.CoreUtil.blockUtil import resolve_block_connections
+from structures.catenary import determine_intersections
 
 
 def _nearest_elevation(x, z, elevation_lut, default=0):
@@ -52,86 +53,206 @@ def _stamp_cross_section(base_points, wire_cross_section):
     return blocks
 
 
-def assemble(
-    wire_cross_section,
-    elevation_lut,
-    t1_intersections=None,
-    t2_intersections=None,
-    pole_indices=None,
-    mask_ranges=None,  # Kept in signature to prevent breaking external calls
-    track_rail_coords=None,
-    use_step_line=True,
-    resolve_blocks=True,
-    override_catenary=False,
-    catenary_positions=None,
-    t1_path_start=None,
-    t2_path_start=None,
-    path_start_index=None,
-    t1_path_end=None,
-    t2_path_end=None,
-    path_end_index=None,
-    min_y_lut=None,
+def _filter_valid_points(intersections):
+    """Return only non-None intersection points."""
+    return [pt for pt in intersections if pt is not None]
+
+
+def _over_track_points(
+    path, tangents, track1, track2, track_width, indices, elevation_lut, use_step_line
 ):
-    has_poles = bool(t1_intersections and t2_intersections and pole_indices)
-    can_prepend = bool(t1_path_start and t2_path_start)
-    can_extend = bool(t1_path_end and t2_path_end)
+    if not indices:
+        return []
+
+    t1_ints, t2_ints = determine_intersections(
+        path, tangents, track1, track2, track_width, indices
+    )
 
     base_points = []
 
-    if has_poles and len(t1_intersections) >= 2:
-        t1_pts = list(t1_intersections)
-        t2_pts = list(t2_intersections)
-        p_indices = list(pole_indices)
-
-        if can_prepend:
-            t1_pts.insert(0, t1_path_start)
-            t2_pts.insert(0, t2_path_start)
-            idx = path_start_index if path_start_index is not None else max(0, p_indices[0] - 1)
-            p_indices.insert(0, idx)
-
-        if can_extend:
-            t1_pts.append(t1_path_end)
-            t2_pts.append(t2_path_end)
-            idx = path_end_index if path_end_index is not None else (p_indices[-1] + 1)
-            p_indices.append(idx)
-
-        # Draw lines continuously across all valid poles, skipping the mask filter
+    t1_pts = _filter_valid_points(t1_ints)
+    if len(t1_pts) >= 2:
         base_points.extend(_draw_lines(t1_pts, elevation_lut, use_step_line))
+
+    t2_pts = _filter_valid_points(t2_ints)
+    if len(t2_pts) >= 2:
         base_points.extend(_draw_lines(t2_pts, elevation_lut, use_step_line))
 
-    elif track_rail_coords:
-        # Fallback to drawing over the line/tracks if no intersections exist
-        base_points.extend(list(track_rail_coords))
+    return base_points
 
-    if not base_points:
-        return {}
 
-    blocks = _stamp_cross_section(base_points, wire_cross_section)
+def _build_excess_segment(
+    path,
+    tangents,
+    track1,
+    track2,
+    track_width,
+    excess_indices,
+    pole_t1_endpoint,
+    pole_t2_endpoint,
+    elevation_lut,
+    use_step_line,
+    append_pole,
+):
+    if not excess_indices:
+        return []
 
-    if resolve_blocks and blocks:
-        blocks_list = {b: list(pts) for b, pts in blocks.items()}
-        blocks_list = resolve_block_connections(blocks_list)
-        blocks = {b: set(pts) for b, pts in blocks_list.items()}
+    t1_ints, t2_ints = determine_intersections(
+        path, tangents, track1, track2, track_width, excess_indices
+    )
 
-    if not override_catenary and catenary_positions:
-        for block in list(blocks.keys()):
-            blocks[block] -= catenary_positions
-            if not blocks[block]:
-                del blocks[block]
+    base_points = []
 
-    # Apply minimum y level filter
-    if min_y_lut and blocks:
-        for block in list(blocks.keys()):
-            filtered = set()
-            for pos in blocks[block]:
-                x, y, z = pos
-                min_y = min_y_lut.get((x, z))
-                if min_y is not None and y < min_y:
-                    continue
-                filtered.add(pos)
-            if filtered:
-                blocks[block] = filtered
+    for track_ints, pole_pt in [
+        (t1_ints, pole_t1_endpoint),
+        (t2_ints, pole_t2_endpoint),
+    ]:
+        pts = _filter_valid_points(track_ints)
+
+        # Connect the excess to the pole intersection point
+        if pole_pt is not None:
+            if append_pole:
+                pts.append(pole_pt)
             else:
-                del blocks[block]
+                pts.insert(0, pole_pt)
 
-    return blocks
+        if len(pts) >= 2:
+            base_points.extend(_draw_lines(pts, elevation_lut, use_step_line))
+
+    return base_points
+
+
+def assemble(
+    path,
+    tangents,
+    elevation_lut,
+    track1,
+    track2,
+    track_width,
+    wires,
+    catenary_intersection_data,
+    subpath_ranges,
+    resolve_blocks=True,
+    protected_coords=None,
+):
+    all_blocks = {}
+
+    if not subpath_ranges:
+        return all_blocks
+
+    # Build the set of all path indices covered by any range
+    covered = set()
+    for s, e in subpath_ranges:
+        covered.update(range(s, e + 1))
+
+    # Merge all catenary pole data that falls within any covered index
+    merged_poles = []
+    for info in catenary_intersection_data.values():
+        pole_indices = info["pole_indices"]
+        t1_ints = info["t1_intersections"]
+        t2_ints = info["t2_intersections"]
+        for i, idx in enumerate(pole_indices):
+            if idx in covered:
+                merged_poles.append((idx, t1_ints[i], t2_ints[i]))
+
+    # Sort and deduplicate by path index
+    merged_poles.sort(key=lambda x: x[0])
+    seen = set()
+    unique_poles = []
+    for idx, t1, t2 in merged_poles:
+        if idx not in seen:
+            seen.add(idx)
+            unique_poles.append((idx, t1, t2))
+
+    pole_indices = [p[0] for p in unique_poles]
+    pole_t1 = [p[1] for p in unique_poles]
+    pole_t2 = [p[2] for p in unique_poles]
+
+    for wire_cfg in wires:
+        wire_cross_section = wire_cfg["wire_cross_section"]
+        use_step_line = wire_cfg.get("use_step_line", False)
+        use_lines = wire_cfg.get("use_lines", True)
+
+        base_points = []
+
+        if use_lines and len(pole_indices) >= 2:
+            t1_pts = _filter_valid_points(pole_t1)
+            t2_pts = _filter_valid_points(pole_t2)
+
+            if len(t1_pts) >= 2:
+                base_points.extend(_draw_lines(t1_pts, elevation_lut, use_step_line))
+            if len(t2_pts) >= 2:
+                base_points.extend(_draw_lines(t2_pts, elevation_lut, use_step_line))
+            excess_before = sorted(i for i in covered if i < pole_indices[0])
+            if excess_before:
+                base_points.extend(
+                    _build_excess_segment(
+                        path,
+                        tangents,
+                        track1,
+                        track2,
+                        track_width,
+                        excess_before,
+                        pole_t1[0],
+                        pole_t2[0],
+                        elevation_lut,
+                        use_step_line,
+                        append_pole=True,
+                    )
+                )
+
+            # --- Excess after last pole: covered indices after last pole ---
+            excess_after = sorted(i for i in covered if i > pole_indices[-1])
+            if excess_after:
+                base_points.extend(
+                    _build_excess_segment(
+                        path,
+                        tangents,
+                        track1,
+                        track2,
+                        track_width,
+                        excess_after,
+                        pole_t1[-1],
+                        pole_t2[-1],
+                        elevation_lut,
+                        use_step_line,
+                        append_pole=False,
+                    )
+                )
+
+        else:
+            all_indices = sorted(covered)
+            base_points.extend(
+                _over_track_points(
+                    path,
+                    tangents,
+                    track1,
+                    track2,
+                    track_width,
+                    all_indices,
+                    elevation_lut,
+                    use_step_line,
+                )
+            )
+
+        if not base_points:
+            continue
+
+        blocks = _stamp_cross_section(base_points, wire_cross_section)
+
+        if resolve_blocks and blocks:
+            blocks_list = {b: list(pts) for b, pts in blocks.items()}
+            blocks_list = resolve_block_connections(blocks_list)
+            blocks = {b: set(pts) for b, pts in blocks_list.items()}
+
+        # Remove wire blocks that overlap with protected catenary coordinates
+        if protected_coords:
+            for block in list(blocks.keys()):
+                blocks[block] -= protected_coords
+                if not blocks[block]:
+                    del blocks[block]
+
+        for block, pts in blocks.items():
+            all_blocks.setdefault(block, set()).update(pts)
+
+    return all_blocks
