@@ -213,6 +213,7 @@ _NON_SURFACE = INVALID_BLOCKS | {
     "minecraft:air",
     "minecraft:cave_air",
     "minecraft:void_air",
+    "minecraft:water",
 }
 
 
@@ -289,7 +290,8 @@ def get_surface(world_dir: str, coordinates: list) -> dict:
             heightmaps = chunk_nbt.get(
                 "Heightmaps", chunk_nbt.get("Level", {}).get("Heightmaps", {})
             )
-            world_surface_array = heightmaps.get("OCEAN_SURFACE")
+            
+            world_surface_array = heightmaps.get("OCEAN_FLOOR")
 
             if world_surface_array is not None:
                 parsed_heights = _parse_heightmap_numpy(world_surface_array)

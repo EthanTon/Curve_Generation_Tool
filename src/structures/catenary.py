@@ -81,14 +81,28 @@ def assemble(
 
     catenary_indices = determine_catenary_indices(path, catenary_interval, offset)
 
-    if covered_indices is not None:
-        catenary_indices = [
-            idx for idx in catenary_indices if idx in covered_indices
-        ]
-
     t1_intersections, t2_intersections = determine_intersections(
         path, tangents, track1, track2, track_width, catenary_indices
     )
+
+    filtered_indices = []
+    filtered_t1 = []
+    filtered_t2 = []
+
+    for i, idx in enumerate(catenary_indices):
+        if covered_indices is not None and idx not in covered_indices:
+            continue
+        t1 = t1_intersections[i]
+        t2 = t2_intersections[i]
+        if t1 is None and t2 is None:
+            continue
+        filtered_indices.append(idx)
+        filtered_t1.append(t1)
+        filtered_t2.append(t2)
+
+    catenary_indices = filtered_indices
+    t1_intersections = filtered_t1
+    t2_intersections = filtered_t2
 
     all_blocks = {}
     origins = []
@@ -164,7 +178,7 @@ def determine_catenary_indices(path, catenary_interval, offset=0):
         dist = ((x - reference_x) ** 2 + (y - reference_y) ** 2) ** 0.5
 
         if line_leaves_bound(step_line(x, y, reference_x, reference_y), bound):
-            determine_valid_midpoint(path, catenary_indices, bound, i)   
+            determine_valid_midpoint(path, catenary_indices, bound, i)
         elif dist < catenary_interval:
             continue
         else:
@@ -196,7 +210,7 @@ def determine_valid_midpoint(
     prev_x, prev_y = path[last_idx]
     for idx in candidates:
         mid_x, mid_y = path[idx]
-        if line_leaves_bound(step_line(mid_x, mid_y, prev_x, prev_y), bound):
+        if line_leaves_bound(bresenham_line(mid_x, mid_y, prev_x, prev_y), bound):
             break
         catenary_indices.append(idx)
         added += 1
@@ -212,7 +226,7 @@ def determine_intersections(
     t1_intersections = []
     t2_intersections = []
 
-    radius = track_width + 1  # 1 is for safety
+    radius = track_width + 2
 
     for idx in catenary_indices:
         angle = float(tangents[idx])
@@ -228,6 +242,17 @@ def determine_intersections(
         cross_line = step_line(pt1_x, pt1_z, pt2_x, pt2_z)
 
         t1i, t2i = _track_intersections(cross_line, track1, track2)
+
+        if t1i is None or t2i is None:
+            wider = radius + track_width
+            w1x, w1z = _norm(x - wider * dx), _norm(z - wider * dz)
+            w2x, w2z = _norm(x + wider * dx), _norm(z + wider * dz)
+            wider_line = step_line(w1x, w1z, w2x, w2z)
+            wt1i, wt2i = _track_intersections(wider_line, track1, track2)
+            if t1i is None:
+                t1i = wt1i
+            if t2i is None:
+                t2i = wt2i
 
         t1_intersections.append(t1i)
         t2_intersections.append(t2i)
