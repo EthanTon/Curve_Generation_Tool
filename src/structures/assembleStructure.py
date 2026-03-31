@@ -158,24 +158,26 @@ def _generate_catenaries(
 
     global_track1, global_track2 = global_tracks
 
-    for struct in structures:
-        if struct.get("type") != "catenary":
-            continue
+    catenary_structures = [s for s in structures if s.get("type") == "catenary"]
 
+    if not catenary_structures:
+        return catenary_positions, catenary_intersection_data, catenary_protected_coords
+
+    base_struct = catenary_structures[0]
+    catenary_interval = base_struct["distance"]
+    track_width = base_struct["track_width"]
+    offset = base_struct.get("offset", 0)
+    override = base_struct.get("override", True)
+
+    global_catenary_lut = {}
+    global_catenaries = {}
+    all_ranges = []
+    min_covered_index = len(path)
+    
+    for struct in catenary_structures:
         struct_cs_names = struct.get("cross_sections", [])
-        catenary_interval = struct["distance"]
-        track_width = struct["track_width"]
-        catenaries = struct["catenaries"]
-        offset = struct.get("offset", 0)
-        override = struct.get("override", True)
+        global_catenaries.update(struct.get("catenaries", {}))
 
-        track1, track2 = _extract_track_halves_for_cs(curve_halves, struct_cs_names)
-
-        intersection_track1, intersection_track2 = global_tracks
-
-        all_ranges = []
-        catenary_lut = {}
-        min_covered_index = len(path)
         for cs_name in struct_cs_names:
             if cs_name not in cross_sections:
                 continue
@@ -189,48 +191,50 @@ def _generate_catenaries(
                     min_covered_index = s
                 for i in range(s, e + 1):
                     x, z = path[i]
-                    catenary_lut[(x, z)] = cs_name
+                    global_catenary_lut[(x, z)] = cs_name
 
-        if not catenary_lut:
-            continue
+    if not global_catenary_lut:
+        return catenary_positions, catenary_intersection_data, catenary_protected_coords
 
-        # Build a set of all valid path indices covered by cross-sections
-        all_ranges.sort()
-        covered_indices = set()
-        for s, e in all_ranges:
-            covered_indices.update(range(s, e + 1))
+    all_ranges.sort()
+    covered_indices = set()
+    for s, e in all_ranges:
+        covered_indices.update(range(s, e + 1))
 
-        effective_offset = min_covered_index + offset
+    effective_offset = min_covered_index + offset
 
-        result, path_origin, intersection_info = assemble_catenary(
-            path=path,
-            tangents=tangents,
-            elev_lut=elev_lut,
-            track1=track1,
-            track2=track2,
-            track_width=track_width,
-            catenary_lut=catenary_lut,
-            catenaries=catenaries,
-            catenary_interval=catenary_interval,
-            offset=effective_offset,
-            covered_indices=covered_indices,
-        )
+    result, path_origin, intersection_info = assemble_catenary(
+        path=path,
+        tangents=tangents,
+        elev_lut=elev_lut,
+        track1=global_track1,
+        track2=global_track2,
+        track_width=track_width,
+        catenary_lut=global_catenary_lut,
+        catenaries=global_catenaries,
+        catenary_interval=catenary_interval,
+        offset=effective_offset,
+        covered_indices=covered_indices,
+    )
 
-        for block, pts in result.items():
-            for coord in pts:
-                catenary_positions[coord] = block
-                if not override:
-                    catenary_protected_coords.add(coord)
+    for block, pts in result.items():
+        for coord in pts:
+            catenary_positions[coord] = block
+            if not override:
+                catenary_protected_coords.add(coord)
 
-        pole_indices = intersection_info["pole_indices"]
-        global_t1, global_t2 = determine_intersections(
-            path,
-            tangents,
-            global_track1,
-            global_track2,
-            track_width,
-            pole_indices,
-        )
+    pole_indices = intersection_info["pole_indices"]
+    global_t1, global_t2 = determine_intersections(
+        path,
+        tangents,
+        global_track1,
+        global_track2,
+        track_width,
+        pole_indices,
+    )
+
+    # Associate intersection data back with all individual structure IDs for accurate wire attachments
+    for struct in catenary_structures:
         catenary_intersection_data[id(struct)] = {
             "pole_indices": pole_indices,
             "t1_intersections": global_t1,

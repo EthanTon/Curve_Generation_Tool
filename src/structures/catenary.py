@@ -79,30 +79,30 @@ def assemble(
         catenary_sections = catenaries[cs_name]
         sections[cs_name] = _precompute_catenary_sections(catenary_sections)
 
-    catenary_indices = determine_catenary_indices(path, catenary_interval, offset)
+    catenary_indices = determine_catenary_indices(
+        path, catenary_interval, offset, covered_indices
+    )
 
     t1_intersections, t2_intersections = determine_intersections(
         path, tangents, track1, track2, track_width, catenary_indices
     )
 
-    filtered_indices = []
-    filtered_t1 = []
-    filtered_t2 = []
+    # filtered_indices = []
+    # filtered_t1 = []
+    # filtered_t2 = []
 
-    for i, idx in enumerate(catenary_indices):
-        if covered_indices is not None and idx not in covered_indices:
-            continue
-        t1 = t1_intersections[i]
-        t2 = t2_intersections[i]
-        if t1 is None and t2 is None:
-            continue
-        filtered_indices.append(idx)
-        filtered_t1.append(t1)
-        filtered_t2.append(t2)
+    # for i, idx in enumerate(catenary_indices):
+    #     t1 = t1_intersections[i]
+    #     t2 = t2_intersections[i]
+    #     if t1 is None and t2 is None:
+    #         continue
+    #     filtered_indices.append(idx)
+    #     filtered_t1.append(t1)
+    #     filtered_t2.append(t2)
 
-    catenary_indices = filtered_indices
-    t1_intersections = filtered_t1
-    t2_intersections = filtered_t2
+    # catenary_indices = filtered_indices
+    # t1_intersections = filtered_t1
+    # t2_intersections = filtered_t2
 
     all_blocks = {}
     origins = []
@@ -164,7 +164,7 @@ def assemble(
     return result, path_origin, intersection_info
 
 
-def determine_catenary_indices(path, catenary_interval, offset=0):
+def determine_catenary_indices(path, catenary_interval, offset=0, covered_indices=None):
     if not path or offset >= len(path):
         return []
     catenary_indices = [offset]
@@ -184,7 +184,12 @@ def determine_catenary_indices(path, catenary_interval, offset=0):
         else:
             catenary_indices.append(i)
 
-        reference_x, reference_y = x, y
+        last = catenary_indices[-1]
+        reference_x, reference_y = path[last]
+
+    # if covered_indices is not None:
+    #     covered_set = set(covered_indices)
+    #     catenary_indices = [i for i in catenary_indices if i in covered_set]
 
     return catenary_indices
 
