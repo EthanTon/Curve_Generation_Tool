@@ -39,7 +39,7 @@ def assemble_structures(
     cross_section_silhouettes,
     curve_halves,
     curve,
-    min_y_lut=None,
+    surface_lut=None,
 ):
     if not structures:
         return
@@ -53,7 +53,7 @@ def assemble_structures(
         cross_sections_index_pairs,
         cross_section_silhouettes,
         curve,
-        min_y_lut=min_y_lut,
+        surface_lut=surface_lut,
     )
 
     all_cs_names = list(curve_halves.keys())
@@ -97,7 +97,7 @@ def _generate_pillars(
     cross_sections_index_pairs,
     cross_section_silhouettes,
     curve,
-    min_y_lut=None,
+    surface_lut=None,
 ):
     pillar_coords = {}
 
@@ -106,6 +106,9 @@ def _generate_pillars(
         cs_mask = cross_section_silhouettes.get(cs_name, set())
 
         for struct in _structures_for_cs(structures, cs_name, "pillar"):
+            min_y = surface_lut if surface_lut and struct.get("use_y_min") else None
+            max_y = surface_lut if surface_lut and struct.get("use_y_max") else None
+
             for s, e in index_ranges:
                 e = min(e, len(path) - 1)
                 if s > e:
@@ -120,7 +123,8 @@ def _generate_pillars(
                     pillar_sections=struct["pillar_sections"],
                     pillar_distance=struct["distance"],
                     mask=cs_mask,
-                    min_y_lut=min_y_lut,
+                    min_y_lut=min_y,
+                    max_y_lut=max_y,
                 )
 
                 for block, pts in result.items():
@@ -167,7 +171,8 @@ def _generate_catenaries(
 
         track1, track2 = _extract_track_halves_for_cs(curve_halves, struct_cs_names)
 
-        # Collect all index ranges and build the catenary_lut as before
+        intersection_track1, intersection_track2 = global_tracks
+
         all_ranges = []
         catenary_lut = {}
         min_covered_index = len(path)
@@ -232,8 +237,10 @@ def _generate_catenaries(
             "t2_intersections": global_t2,
         }
 
-    # Purge catenary coordinates from existing curve blocks
+    # Purge catenary coordinates from existing curve blocks (skip override=false)
     for coord in catenary_positions:
+        if coord in catenary_protected_coords:
+            continue
         for existing_pts in curve.values():
             existing_pts.discard(coord)
 

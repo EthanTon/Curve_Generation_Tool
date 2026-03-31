@@ -53,6 +53,22 @@ def _stamp_cross_section(base_points, wire_cross_section):
     return blocks
 
 
+def _draw_line_segments(points, elevation_lut, use_step_line):
+    """Draw lines between consecutive non-None points, splitting at None gaps."""
+    result = []
+    segment = []
+    for pt in points:
+        if pt is not None:
+            segment.append(pt)
+        else:
+            if len(segment) >= 2:
+                result.extend(_draw_lines(segment, elevation_lut, use_step_line))
+            segment = []
+    if len(segment) >= 2:
+        result.extend(_draw_lines(segment, elevation_lut, use_step_line))
+    return result
+
+
 def _filter_valid_points(intersections):
     """Return only non-None intersection points."""
     return [pt for pt in intersections if pt is not None]
@@ -70,13 +86,8 @@ def _over_track_points(
 
     base_points = []
 
-    t1_pts = _filter_valid_points(t1_ints)
-    if len(t1_pts) >= 2:
-        base_points.extend(_draw_lines(t1_pts, elevation_lut, use_step_line))
-
-    t2_pts = _filter_valid_points(t2_ints)
-    if len(t2_pts) >= 2:
-        base_points.extend(_draw_lines(t2_pts, elevation_lut, use_step_line))
+    base_points.extend(_draw_line_segments(t1_ints, elevation_lut, use_step_line))
+    base_points.extend(_draw_line_segments(t2_ints, elevation_lut, use_step_line))
 
     return base_points
 
@@ -122,6 +133,20 @@ def _build_excess_segment(
     return base_points
 
 
+def _merge_contiguous_ranges(ranges):
+    """Merge overlapping or adjacent (s,e) ranges into contiguous blocks."""
+    if not ranges:
+        return []
+    sorted_ranges = sorted(ranges)
+    merged = [list(sorted_ranges[0])]
+    for s, e in sorted_ranges[1:]:
+        if s <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
 def assemble(
     path,
     tangents,
@@ -140,12 +165,16 @@ def assemble(
     if not subpath_ranges:
         return all_blocks
 
-    # Build the set of all path indices covered by any range
+    # Merge overlapping/adjacent ranges into contiguous blocks
+    contiguous_blocks = _merge_contiguous_ranges(subpath_ranges)
+
+    # Build the full covered set (for the non-line fallback path)
     covered = set()
-    for s, e in subpath_ranges:
+    for s, e in contiguous_blocks:
         covered.update(range(s, e + 1))
 
-    # Merge all catenary pole data that falls within any covered index
+    # Collect all catenary pole data that falls within any covered index,
+    # sorted and deduplicated by path index
     merged_poles = []
     for info in catenary_intersection_data.values():
         pole_indices = info["pole_indices"]
@@ -155,7 +184,6 @@ def assemble(
             if idx in covered:
                 merged_poles.append((idx, t1_ints[i], t2_ints[i]))
 
-    # Sort and deduplicate by path index
     merged_poles.sort(key=lambda x: x[0])
     seen = set()
     unique_poles = []
@@ -164,10 +192,6 @@ def assemble(
             seen.add(idx)
             unique_poles.append((idx, t1, t2))
 
-    pole_indices = [p[0] for p in unique_poles]
-    pole_t1 = [p[1] for p in unique_poles]
-    pole_t2 = [p[2] for p in unique_poles]
-
     for wire_cfg in wires:
         wire_cross_section = wire_cfg["wire_cross_section"]
         use_step_line = wire_cfg.get("use_step_line", False)
@@ -175,50 +199,86 @@ def assemble(
 
         base_points = []
 
-        if use_lines and len(pole_indices) >= 2:
-            t1_pts = _filter_valid_points(pole_t1)
-            t2_pts = _filter_valid_points(pole_t2)
+        if use_lines:
+            # Process each contiguous block independently so wires never
+            # span across gaps between non-consecutive cross-sections.
+            for blk_s, blk_e in contiguous_blocks:
+                blk_covered = set(range(blk_s, blk_e + 1))
 
-            if len(t1_pts) >= 2:
-                base_points.extend(_draw_lines(t1_pts, elevation_lut, use_step_line))
-            if len(t2_pts) >= 2:
-                base_points.extend(_draw_lines(t2_pts, elevation_lut, use_step_line))
-            excess_before = sorted(i for i in covered if i < pole_indices[0])
-            if excess_before:
-                base_points.extend(
-                    _build_excess_segment(
-                        path,
-                        tangents,
-                        track1,
-                        track2,
-                        track_width,
-                        excess_before,
-                        pole_t1[0],
-                        pole_t2[0],
-                        elevation_lut,
-                        use_step_line,
-                        append_pole=True,
+                # Poles belonging to this contiguous block
+                blk_poles = [
+                    (idx, t1, t2) for idx, t1, t2 in unique_poles if idx in blk_covered
+                ]
+
+                if len(blk_poles) < 2:
+                    # Not enough poles in this block – fall back to over-track
+                    blk_indices = sorted(blk_covered)
+                    base_points.extend(
+                        _over_track_points(
+                            path,
+                            tangents,
+                            track1,
+                            track2,
+                            track_width,
+                            blk_indices,
+                            elevation_lut,
+                            use_step_line,
+                        )
                     )
+                    continue
+
+                blk_pole_indices = [p[0] for p in blk_poles]
+                blk_t1 = [p[1] for p in blk_poles]
+                blk_t2 = [p[2] for p in blk_poles]
+
+                base_points.extend(
+                    _draw_line_segments(blk_t1, elevation_lut, use_step_line)
+                )
+                base_points.extend(
+                    _draw_line_segments(blk_t2, elevation_lut, use_step_line)
                 )
 
-            # --- Excess after last pole: covered indices after last pole ---
-            excess_after = sorted(i for i in covered if i > pole_indices[-1])
-            if excess_after:
-                base_points.extend(
-                    _build_excess_segment(
-                        path,
-                        tangents,
-                        track1,
-                        track2,
-                        track_width,
-                        excess_after,
-                        pole_t1[-1],
-                        pole_t2[-1],
-                        elevation_lut,
-                        use_step_line,
-                        append_pole=False,
-                    )
+                # Excess before first pole in this block
+                excess_before = sorted(
+                    i for i in blk_covered if i < blk_pole_indices[0]
                 )
+                if excess_before:
+                    base_points.extend(
+                        _build_excess_segment(
+                            path,
+                            tangents,
+                            track1,
+                            track2,
+                            track_width,
+                            excess_before,
+                            blk_t1[0],
+                            blk_t2[0],
+                            elevation_lut,
+                            use_step_line,
+                            append_pole=True,
+                        )
+                    )
+
+                # Excess after last pole in this block
+                excess_after = sorted(
+                    i for i in blk_covered if i > blk_pole_indices[-1]
+                )
+                if excess_after:
+                    base_points.extend(
+                        _build_excess_segment(
+                            path,
+                            tangents,
+                            track1,
+                            track2,
+                            track_width,
+                            excess_after,
+                            blk_t1[-1],
+                            blk_t2[-1],
+                            elevation_lut,
+                            use_step_line,
+                            append_pole=False,
+                        )
+                    )
 
         else:
             all_indices = sorted(covered)

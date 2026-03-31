@@ -98,8 +98,10 @@ def _prepare_halves(cross_section, symmetrical, resolve_rails):
     return [(precompute_sections(cross_section), coord_map, rc_a)]
 
 
-def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=None):
+def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=None, min_y_lut=None, max_y_lut=None):
     center_y = elev_lut.get((xc, zc), 0)
+    center_min = min_y_lut.get((xc, zc)) if min_y_lut is not None else None
+    center_max = max_y_lut.get((xc, zc)) if max_y_lut is not None else None
     for block, offsets in section.items():
         is_rail = rail_coords is not None and is_rail_block(block)
         for rx, ry, rz in offsets:
@@ -107,6 +109,14 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=
             if (wx, wz) not in silhouette:
                 continue
             wy = elev_lut.get((wx, wz), center_y) + ry
+            if min_y_lut is not None:
+                min_y = min_y_lut.get((wx, wz), center_min)
+                if min_y is not None and wy <= min_y:
+                    continue
+            if max_y_lut is not None:
+                max_y = max_y_lut.get((wx, wz), center_max)
+                if max_y is not None and wy > max_y:
+                    continue
             coord = (wx, wy, wz)
             if coord in coord_map and coord_map[coord] != block:
                 curve[coord_map[coord]].discard(coord)
@@ -116,10 +126,12 @@ def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, curve, rail_coords=
                 rail_coords.add(coord)
 
 
-def _stamp_halves(xc, zc, halves, key, silhouette, elev_lut, curve_halves):
+def _stamp_halves(xc, zc, halves, key, silhouette, elev_lut, curve_halves, min_y_lut=None, max_y_lut=None):
     for i, (sections, coord_map, rc) in enumerate(halves):
         _stamp(
-            xc, zc, sections[key], silhouette, elev_lut, coord_map, curve_halves[i], rc
+            xc, zc, sections[key], silhouette, elev_lut, coord_map, curve_halves[i], rc,
+            min_y_lut=min_y_lut,
+            max_y_lut=max_y_lut,
         )
 
 
@@ -135,10 +147,19 @@ def _walk_path(
     elev_lut,
     curve_halves,
     radius,
+    surface_lut=None,
 ):
     prev_sector = None
     flipped = False
     angle_90 = 0
+
+    # Per-CS surface lut resolution
+    cs_min_y = {}
+    cs_max_y = {}
+    if surface_lut:
+        for cs_name, cs_def in cross_sections.items():
+            cs_min_y[cs_name] = surface_lut if cs_def.get("use_y_min") else None
+            cs_max_y[cs_name] = surface_lut if cs_def.get("use_y_max") else None
 
     idx = 0
     while idx < len(path):
@@ -202,6 +223,8 @@ def _walk_path(
                     cs_sil,
                     elev_lut,
                     curve_halves[cs_name],
+                    min_y_lut=cs_min_y.get(cs_name),
+                    max_y_lut=cs_max_y.get(cs_name),
                 )
 
                 bt = backtrack_steps if had_odd else cross_sections[cs_name]["dept"]
@@ -216,6 +239,8 @@ def _walk_path(
                         cs_sil,
                         elev_lut,
                         curve_halves[cs_name],
+                        min_y_lut=cs_min_y.get(cs_name),
+                        max_y_lut=cs_max_y.get(cs_name),
                     )
 
         if not in_ext:
@@ -235,6 +260,8 @@ def _walk_path(
                 cs_sil,
                 elev_lut,
                 curve_halves[cs_name],
+                min_y_lut=cs_min_y.get(cs_name),
+                max_y_lut=cs_max_y.get(cs_name),
             )
 
         idx += 1
@@ -267,7 +294,7 @@ def assemble_advance_curve(
     step_size=1,
     symmetrical=False,
     resolve_rails=False,
-    min_y_lut=None,
+    surface_lut=None,
 ):
     if structures is None:
         structures = []
@@ -331,6 +358,7 @@ def assemble_advance_curve(
         elev_lut,
         curve_halves,
         radius,
+        surface_lut=surface_lut,
     )
 
     curve = _merge_curve_halves(curve_halves)
@@ -359,24 +387,10 @@ def assemble_advance_curve(
         cross_section_silhouettes=cross_section_silhouettes,
         curve_halves=curve_halves,
         curve=curve,
-        min_y_lut=min_y_lut,
+        surface_lut=surface_lut,
     )
 
     result = {block: list(pts) for block, pts in curve.items() if pts}
-
-    # Apply minimum y level filter to the entire result
-    if min_y_lut and result:
-        for block in list(result.keys()):
-            filtered = [
-                pos
-                for pos in result[block]
-                if min_y_lut.get((pos[0], pos[2])) is None
-                or pos[1] >= min_y_lut[(pos[0], pos[2])]
-            ]
-            if filtered:
-                result[block] = filtered
-            else:
-                del result[block]
 
     if resolve_rails:
         from util.CoreUtil.blockUtil import resolve_rail_shapes

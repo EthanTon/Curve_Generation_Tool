@@ -50,9 +50,6 @@ _ORIENT_DIR_CW = {
 _RAIL_BLOCKS = frozenset(
     {
         "minecraft:rail",
-        "minecraft:powered_rail",
-        "minecraft:detector_rail",
-        "minecraft:activator_rail",
     }
 )
 
@@ -393,5 +390,5 @@ def resolve_connectable_blocks(blocks_dict):
 def resolve_block_connections(blocks_dict, rail_groups=None):
     blocks_dict = resolve_rail_shapes(blocks_dict, rail_groups=rail_groups)
     blocks_dict = resolve_connectable_blocks(blocks_dict)
-    blocks_dict = resolve_redstone_wire(blocks_dict) 
+    blocks_dict = resolve_redstone_wire(blocks_dict)
     return blocks_dict

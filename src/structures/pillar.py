@@ -3,18 +3,23 @@ from util.CoreUtil.blockUtil import rotate_block_state, mirror_block_state
 from curveAssembly import _norm
 
 
-def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar, min_y_lut=None):
-    use_min_y = min_y_lut is not None
+def _stamp(xc, zc, section, silhouette, elev_lut, coord_map, pillar, min_y_lut=None, max_y_lut=None):
     center_y = elev_lut.get((xc, zc), 0)
+    center_min = min_y_lut.get((xc, zc)) if min_y_lut is not None else None
+    center_max = max_y_lut.get((xc, zc)) if max_y_lut is not None else None
     for block, offsets in section.items():
         for rx, ry, rz in offsets:
             wx, wz = _norm(xc + rx), _norm(zc + rz)
             if (wx, wz) not in silhouette:
                 continue
             wy = center_y + ry
-            if use_min_y:
-                min_y = min_y_lut.get((wx, wz))
-                if min_y is not None and wy < min_y:
+            if min_y_lut is not None:
+                min_y = min_y_lut.get((wx, wz), center_min)
+                if min_y is not None and wy <= min_y:
+                    continue
+            if max_y_lut is not None:
+                max_y = max_y_lut.get((wx, wz), center_max)
+                if max_y is not None and wy > max_y:
                     continue
             coord = (wx, wy, wz)
             if coord in coord_map and coord_map[coord] != block:
@@ -35,8 +40,6 @@ def _pick_pillar_points(path, pillar_distance):
         if accum >= pillar_distance:
             indices.append(i)
             accum = 0.0
-    if indices[-1] != len(path) - 1:
-        indices.append(len(path) - 1)
     return indices
 
 
@@ -91,6 +94,7 @@ def assemble(
     pillar_distance: int,
     mask: set,
     min_y_lut=None,
+    max_y_lut=None,
 ):
     sections = _precompute_pillar_sections(pillar_sections)
     pillar_indices = _pick_pillar_points(path, pillar_distance)
@@ -114,6 +118,7 @@ def assemble(
             coord_map,
             stamp_blocks,
             min_y_lut,
+            max_y_lut,
         )
 
         for block, pts in stamp_blocks.items():

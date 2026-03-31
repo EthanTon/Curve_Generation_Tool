@@ -103,7 +103,7 @@ def get_global_coordinates(
 
 
 def create_schematic(
-    blocks, offset=(0, 0, 0), data_version=3700, fill_block="minecraft:air"
+    blocks, offset=(0, 0, 0), data_version=4440, fill_block="minecraft:air"
 ):
     if not blocks:
         raise ValueError("blocks list must not be empty")

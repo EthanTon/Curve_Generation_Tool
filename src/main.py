@@ -28,6 +28,7 @@ Expected JSON — advance (multi cross-section + structures):
 {
     "control_points": [[x, z, angle_degrees], ...],
     "elevation_points": [[x, z, y], ...],
+    "surface_file": "surface.json",
     "cross_sections": {
         "main": {
             "schematic": "road.schem",
@@ -62,6 +63,7 @@ Expected JSON — advance (multi cross-section + structures):
             "distance": 20,
             "track_width": 5,
             "offset": 0
+            "override": false
         },
         {
             "type": "wire",
@@ -164,6 +166,12 @@ def _resolve_path(json_dir, filename):
     return os.path.join(json_dir, filename)
 
 
+def _load_surface(path):
+    with open(path, "r") as f:
+        pts = json.load(f)
+    return {(int(pt[0]), int(pt[1])): pt[2] for pt in pts}
+
+
 def _apply_offset(blocks_dict, offset):
     """Shift every position in *blocks_dict* by *offset*."""
     ox, oy, oz = offset
@@ -242,6 +250,8 @@ def _load_structure(cfg, json_dir):
             "cross_sections": cs_names,
             "pillar_sections": pillar_sections,
             "distance": cfg["distance"],
+            "use_y_min": cfg.get("use_y_min", False),
+            "use_y_max": cfg.get("use_y_max", False),
         }
 
     if cfg.get("type") == "catenary":
@@ -358,6 +368,8 @@ def _load_advance_cross_sections(cs_config, json_dir):
             "cross_section": cs_data,
             "width": entry["width"],
             "dept": entry["dept"],
+            "use_y_min": entry.get("use_y_min", False),
+            "use_y_max": entry.get("use_y_max", False),
             "point_pairs": [
                 (tuple(pair[0]), tuple(pair[1])) for pair in entry["points"]
             ],
@@ -567,6 +579,11 @@ def main():
             json_dir,
         )
 
+        surface_lut = None
+        if "surface_file" in data:
+            sf_path = _resolve_path(json_dir, data["surface_file"])
+            surface_lut = _load_surface(sf_path)
+
         blocks_dict, path_origin = assemble_advance_curve(
             control_points=control_points,
             radius=args.radius,
@@ -576,6 +593,7 @@ def main():
             step_size=args.step_size,
             symmetrical=args.symmetrical,
             resolve_rails=args.resolve_rails,
+            surface_lut=surface_lut,
         )
         halves_list = None
 
