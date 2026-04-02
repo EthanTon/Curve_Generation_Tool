@@ -1,5 +1,6 @@
 from util.CoreUtil.shapeUtil import step_line, bresenham_line
 from util.CoreUtil.blockUtil import resolve_block_connections
+from util.CoreUtil.maskingUtil import mask
 from structures.catenary import determine_intersections
 
 
@@ -75,20 +76,24 @@ def _filter_valid_points(intersections):
 
 
 def _over_track_points(
-    path, tangents, track1, track2, track_width, indices, elevation_lut, use_step_line
+    path, track1, track2, track_width, indices, silhouette, elevation_lut
 ):
     if not indices:
         return []
 
-    t1_ints, t2_ints = determine_intersections(
-        path, tangents, track1, track2, track_width, indices
-    )
+    coverage_map = set()
+    masked_segment = mask(path, indices[0], indices[-1], track_width, silhouette)
+    coverage_map.update(masked_segment)
 
     base_points = []
-
-    base_points.extend(_draw_line_segments(t1_ints, elevation_lut, use_step_line))
-    base_points.extend(_draw_line_segments(t2_ints, elevation_lut, use_step_line))
-
+    for pt in track1:
+        if pt in coverage_map:                
+            y = elevation_lut[pt]
+            base_points.append((pt[0], y, pt[1]))
+    for pt in track2:
+        if pt in coverage_map:                
+            y = elevation_lut[pt]
+            base_points.append((pt[0], y, pt[1]))
     return base_points
 
 
@@ -154,6 +159,7 @@ def assemble(
     track1,
     track2,
     track_width,
+    cross_section_silhouettes,
     wires,
     catenary_intersection_data,
     subpath_ranges,
@@ -172,6 +178,11 @@ def assemble(
     covered = set()
     for s, e in contiguous_blocks:
         covered.update(range(s, e + 1))
+
+    silhouette = set()
+    #Rebuild silhouette
+    for points in cross_section_silhouettes.values():
+        silhouette.update(points)
 
     # Collect all catenary pole data that falls within any covered index,
     # sorted and deduplicated by path index
@@ -216,13 +227,12 @@ def assemble(
                     base_points.extend(
                         _over_track_points(
                             path,
-                            tangents,
                             track1,
                             track2,
                             track_width,
                             blk_indices,
+                            silhouette,
                             elevation_lut,
-                            use_step_line,
                         )
                     )
                     continue
@@ -285,13 +295,12 @@ def assemble(
             base_points.extend(
                 _over_track_points(
                     path,
-                    tangents,
                     track1,
                     track2,
                     track_width,
                     all_indices,
+                    silhouette,
                     elevation_lut,
-                    use_step_line,
                 )
             )
 
