@@ -1,124 +1,4 @@
 #!/usr/bin/env python3
-"""
-main.py – CLI for assembling Minecraft curves.
-
-Usage examples:
-  # Single cross-section (original mode)
-  python main.py -i road.schem -o output.schem --radius 20 --width 5 --dept 3 points.json
-
-  # Advance mode – multiple cross-sections + structures defined in JSON
-  python main.py -o output.schem --radius 20 advance.json
-
-  # Path-only with custom block
-  python main.py -o output.schem --radius 20 --dept 3 --block minecraft:oak_planks points.json
-
-Mode selection
---------------
-  -i SCHEM + JSON         → original assemble_curve (single cross-section)
-  JSON with cross_sections key → advance assemble_advance_curve
-  neither                      → path-only
-
-Expected JSON — simple (points only):
-{
-    "control_points": [[x, z, angle_degrees], ...],
-    "elevation_points": [[x, z, y], ...]
-}
-
-Expected JSON — advance (multi cross-section + structures):
-{
-    "control_points": [[x, z, angle_degrees], ...],
-    "elevation_points": [[x, z, y], ...],
-    "surface_file": "surface.json",
-    "cross_sections": {
-        "main": {
-            "schematic": "road.schem",
-            "width": 5,
-            "dept": 3,
-            "points": [[[x1, z1], [x2, z2]], ...]
-        },
-        "bridge": {
-            "schematic": "bridge.schem",
-            "width": 8,
-            "dept": 4,
-            "slice_axis": "y",
-            "slice_level": 64,
-            "points": [[[x1, z1], [x2, z2]], ...]
-        }
-    },
-    "structures": [
-        {
-            "type": "pillar",
-            "cross_section": "bridge",
-            "0": "pillar_0.schem",
-            "22.5": "pillar_22.schem",
-            "45": "pillar_45.schem",
-            "distance": 20
-        },
-        {
-            "type": "catenary",
-            "cross_section": "main",
-            "0": "catenary_0.schem",
-            "22.5": "catenary_22.schem",
-            "45": "catenary_45.schem",
-            "distance": 20,
-            "track_width": 5,
-            "offset": 0
-            "override": false
-        },
-        {
-            "type": "wire",
-            "cross_sections": ["main", "bridge"],
-            "track_width": 5,
-            "wires": [
-                {
-                    "schematic": "wire.schem",
-                    "use_step_line": true,
-                    "use_lines": true
-                }
-            ]
-        }
-    ]
-}
-
-Every cross-section — including "main" — must declare explicit "points"
-(point-pairs) to define which path segments it covers.  There is no implicit
-default; uncovered segments are simply skipped.
-
-Structures are declared in a top-level "structures" list.  Each entry must
-contain "type" and either "cross_section" (a single name) or "cross_sections"
-(a name or list of names) referencing cross_sections entries.  A structure
-with multiple cross-sections is generated once for each referenced
-cross-section.
-
-Pillar structures supply three schematics keyed by base angle ("0", "22.5",
-"45").  All 16 orientations (0° through 337.5° in 22.5° steps) are derived
-from these three via 90° rotation and mirroring.
-
-Catenary structures supply three schematics keyed by base angle ("0",
-"22.5", "45").  All 16 orientations (0° through 337.5° in 22.5° steps)
-are derived from these three via 90° rotation and mirroring.  "distance"
-sets the interval between poles along the path.  "track_width" is the
-width of each track half.  Each slice is defined as left at 0 degrees and
-facing centre; track-2 (right side) slices are automatically mirrored.
-"override" (default true) controls whether catenary blocks replace
-existing curve blocks at the same coordinates; set to false to merge
-catenary blocks without purging the originals.
-
-Wire structures declare a "wires" list where each entry contains a
-"schematic" whose cross-section is stamped along the wire path.
-"track_width" (required at the structure level) sets the gauge used for
-perpendicular intersection searches.  When "use_lines" is true (the
-default), straight lines are drawn between consecutive catenary pole
-intersection points on each track; path segments before the first pole
-and after the last pole fall back to following the track geometry.  When
-"use_lines" is false (or fewer than two poles exist), the entire wire
-follows the track geometry.  Per-wire options:
-    "schematic": path to the wire cross-section schematic (required).
-    "use_step_line": true/false (default true) — true for axis-aligned
-        stepping (step_line), false for diagonal Bresenham (bresenham_line).
-    "use_lines": true/false (default true) — true to draw straight lines
-        between pole intersections, false to follow tracks entirely.
-"""
 
 import argparse
 import json
@@ -140,9 +20,6 @@ from util.CoreUtil.crossSectionUtil import (
     cross_section_at_z,
     to_curve_offsets,
 )
-
-
-# ── helpers ─────────────────────────────────────────────────────────────
 
 
 def _load_json(path):
@@ -430,10 +307,6 @@ def _patch_block_type(blocks_dict, block_type):
         merged.extend(positions)
     return {block_type: merged}
 
-
-# ── CLI ─────────────────────────────────────────────────────────────────
-
-
 def build_parser():
     p = argparse.ArgumentParser(
         description="Assemble a Minecraft curve and export it.",
@@ -543,9 +416,6 @@ def build_parser():
     return p
 
 
-# ── main ────────────────────────────────────────────────────────────────
-
-
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -560,7 +430,7 @@ def main():
     control_points, elevation_points = _parse_points(data)
     has_advance = "cross_sections" in data
 
-    # ── Advance mode ────────────────────────────────────────────────
+    # Advance Mode
     if has_advance:
         if args.input:
             parser.error(
@@ -597,7 +467,7 @@ def main():
         )
         halves_list = None
 
-    # ── Original single cross-section mode ──────────────────────────
+    # Single Cross Section Mode
     elif args.input:
         if len(control_points) < 2:
             parser.error("Cross-section mode requires at least 2 control points.")
@@ -633,7 +503,7 @@ def main():
             blocks_dict, path_origin = curve_result
             halves_list = None
 
-    # ── Path-only mode ──────────────────────────────────────────────
+    # Path Only Mode
     else:
         if len(control_points) < 2:
             parser.error("At least 2 control points are required.")

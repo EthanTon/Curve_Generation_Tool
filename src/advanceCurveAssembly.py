@@ -377,7 +377,7 @@ def assemble_advance_curve(
     # Slice tangents to match raw_path
     raw_tangents = tangents[raw_start:raw_end]
 
-    assemble_structures(
+    structure_coords = assemble_structures(
         path=raw_path,
         tangents=raw_tangents,
         elev_lut=elev_lut,
@@ -391,6 +391,18 @@ def assemble_advance_curve(
     )
 
     result = {block: list(pts) for block, pts in curve.items() if pts}
+
+    # Ensure structures definitively override curve blocks in the final result
+    if structure_coords:
+        result_sets = {block: set(pts) for block, pts in result.items()}
+
+        for coord, block in structure_coords.items():
+            for existing_block, pts in result_sets.items():
+                if existing_block != block:
+                    pts.discard(coord)
+            result_sets.setdefault(block, set()).add(coord)
+
+        result = {block: list(pts) for block, pts in result_sets.items() if pts}
 
     if resolve_rails:
         from util.CoreUtil.blockUtil import resolve_rail_shapes

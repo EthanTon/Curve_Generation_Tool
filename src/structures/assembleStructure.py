@@ -42,9 +42,9 @@ def assemble_structures(
     surface_lut=None,
 ):
     if not structures:
-        return
+        return {}
 
-    _generate_pillars(
+    pillar_coords = _generate_pillars(
         path,
         tangents,
         elev_lut,
@@ -62,7 +62,7 @@ def assemble_structures(
     )
 
     # --- Catenaries ---
-    _, catenary_intersection_data, catenary_protected_coords = _generate_catenaries(
+    catenary_positions, catenary_intersection_data, catenary_protected_coords = _generate_catenaries(
         path,
         tangents,
         structures,
@@ -74,7 +74,7 @@ def assemble_structures(
         curve,
     )
 
-    _generate_wires(
+    wire_positions = _generate_wires(
         path,
         tangents,
         elev_lut,
@@ -87,6 +87,14 @@ def assemble_structures(
         catenary_protected_coords,
         curve,
     )
+
+    # Combine all structure coordinates (later types override earlier ones)
+    all_structure_coords = {}
+    all_structure_coords.update(pillar_coords)
+    all_structure_coords.update(catenary_positions)
+    all_structure_coords.update(wire_positions)
+
+    return all_structure_coords
 
 
 def _generate_pillars(
@@ -140,6 +148,8 @@ def _generate_pillars(
     # Merge pillar blocks into curve
     for coord, block in pillar_coords.items():
         curve.setdefault(block, set()).add(coord)
+
+    return pillar_coords
 
 
 def _generate_catenaries(
@@ -322,3 +332,5 @@ def _generate_wires(
     # Merge wire blocks into curve
     for coord, block in wire_positions.items():
         curve.setdefault(block, set()).add(coord)
+
+    return wire_positions

@@ -107,6 +107,14 @@ def auto(yml_path, output_path, world_path=None, use_curve_util=False):
         region = generate_surface_region(
             path, segments, config, max_width, silhouette
         )
+        # Fall back to full path silhouette if no cross sections declare
+        # use_y_min / use_y_max (so the surface file is always produced).
+        if not region:
+            if silhouette:
+                region = silhouette
+            else:
+                from auto.logic import _approx_silhouette
+                region = _approx_silhouette(path, max_width)
         if region:
             surf_data = _try_get_surface(effective_world, list(region))
             if surf_data:
